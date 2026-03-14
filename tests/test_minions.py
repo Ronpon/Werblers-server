@@ -207,14 +207,14 @@ class TestTraitOnGainMinions:
         log = self._gain_trait(p, "alpha", "Alpha")
         assert len(p.minions) == 1
         assert p.minions[0].name == "Pet Velociraptor"
-        assert p.minions[0].strength_bonus == 7
+        assert p.minions[0].strength_bonus == 5
 
     def test_new_lord_grants_demon_spawn(self):
         p = _player()
         log = self._gain_trait(p, "new_lord", "New Lord")
         assert len(p.minions) == 1
         assert p.minions[0].name == "Demon Spawn"
-        assert p.minions[0].strength_bonus == 8
+        assert p.minions[0].strength_bonus == 6
 
     def test_overlord_grants_minion_wrangler(self):
         p = _player()

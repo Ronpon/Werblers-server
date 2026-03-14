@@ -178,7 +178,7 @@ function buildBoard() {
     div.appendChild(img);
     const numLabel = document.createElement('span');
     numLabel.className = 'tile-number';
-    numLabel.textContent = n;
+    numLabel.textContent = n === 1 ? 'Start' : n;
     div.appendChild(numLabel);
     const tokenArea = document.createElement('div');
     tokenArea.className = 'token-area';
@@ -270,11 +270,17 @@ function renderItemRow(item) {
   const img = item.card_image ? ` data-card-image="/images/${item.card_image}"` : '';
   return `<div class="stat-item has-card-preview"${img}>${item.name}${badges ? ' ' + badges : ''}</div>`;
 }
-function renderPackItemRow(item, packIndex, canEquip) {
+function renderPackItemRow(item, packIndex, isCurrentViewing, canUseOverworld) {
   const badges = tokenBadges(item.tokens);
   const img = item.card_image ? ` data-card-image="/images/${item.card_image}"` : '';
-  const equipBtn = canEquip ? ` <button class="btn-tiny btn-equip-pack" onclick="equipFromPack(${packIndex})">Equip</button>` : '';
-  return `<div class="stat-item has-card-preview"${img}>${item.name}${badges ? ' ' + badges : ''}${equipBtn}</div>`;
+  let actions = '';
+  if (item.is_consumable && canUseOverworld) {
+    // Consumable pack item — show Use button instead of Equip
+    actions = ` <button class="btn-tiny btn-equip-pack" onclick="usePackConsumable(${packIndex})">Use</button>`;
+  } else if (isCurrentViewing && !item.is_consumable) {
+    actions = ` <button class="btn-tiny btn-equip-pack" onclick="equipFromPack(${packIndex})">Equip</button>`;
+  }
+  return `<div class="stat-item has-card-preview"${img}>${item.name}${badges ? ' ' + badges : ''}${actions}</div>`;
 }
 function renderTraitRow(t) {
   const badges = tokenBadges(t.tokens);
@@ -299,9 +305,16 @@ function updatePlayerStats(state) {
   ];
   if (equip.length) sections.push(statGroup('Equipped', equip.join('')));
   const isCurrentViewing = p.player_id === state.current_player_id && state.game_status === 'IN_PROGRESS' && !state.has_pending_offer;
+  const canUseOverworld = isCurrentViewing && !state.has_pending_combat;
   const packRows = [
-    ...p.pack.map((item, idx)    => renderPackItemRow(item, idx, isCurrentViewing)),
-    ...p.consumables.map(c       => `<div class="stat-item has-card-preview" data-card-image="/images/${c.card_image}">🧪 ${c.name}</div>`),
+    ...p.pack.map((item, idx)    => renderPackItemRow(item, idx, isCurrentViewing, canUseOverworld)),
+    ...p.consumables.map((c, i) => {
+      const imgAttr = c.card_image ? ` data-card-image="/images/${c.card_image}"` : '';
+      // Left-click on any consumable when it's the current player's overworld turn
+      const clickAttr = canUseOverworld ? ` onclick="promptUseConsumable(${i})" title="Click to use"` : '';
+      const clickCls  = canUseOverworld ? ' consumable-clickable' : '';
+      return `<div class="stat-item has-card-preview${clickCls}"${imgAttr}${clickAttr}>🧪 ${c.name}</div>`;
+    }),
     ...p.captured_monsters.map(m => `<div class="stat-item has-card-preview" data-card-image="/images/${m.card_image}">🐾 ${m.name}</div>`),
   ];
   const used = p.pack.length + p.consumables.length + p.captured_monsters.length;
@@ -320,7 +333,7 @@ function updatePlayerStats(state) {
     <div class="player-header">
       <div class="player-name-str">
         <span class="player-name">${p.name}</span>
-        <span class="player-str">STR ${p.strength}</span>
+        <span class="player-str" title="${_playerStrBreakdown(p).replace(/"/g, '&quot;')}" style="cursor:help">STR ${p.strength}</span>
       </div>
       <div class="player-pos">Tile ${p.position}</div>
       ${bosses ? `<div class="boss-status">${bosses}</div>` : ''}
@@ -337,6 +350,8 @@ function statGroup(title, rowsHtml, titleClass = '') {
   </div>`;
 }
 // ================================================================ EQUIP FROM PACK
+let _occupiedSlotPackIndex = -1;
+
 async function equipFromPack(packIndex) {
   const resp = await fetch('/api/equip_from_pack', {
     method: 'POST',
@@ -351,22 +366,53 @@ async function equipFromPack(packIndex) {
       if (item) {
         const slotMap = { helmet: p.helmets, chest: p.chest_armor, legs: p.leg_armor, weapon: p.weapons };
         const equipped = slotMap[item.slot] || [];
-        const existingName = equipped[0]?.name || 'existing item';
-        if (!confirm(`Replace "${existingName}" with "${item.name}"?\n(The replaced item will be discarded.)`)) return;
-        const resp2 = await fetch('/api/equip_from_pack', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pack_index: packIndex, force: true }),
-        });
-        const data2 = await resp2.json();
-        if (data2.error) { alert(data2.error); return; }
-        applyState(data2.state);
+        const equippedItem = equipped[0] || null;
+        _showOccupiedSlotModal(packIndex, item, equippedItem, p.pack_slots_free);
         return;
       }
     }
     alert(data.error);
     return;
   }
+  applyState(data.state);
+}
+
+function _showOccupiedSlotModal(packIndex, newItem, equippedItem, packSlotsFree) {
+  _occupiedSlotPackIndex = packIndex;
+  const modal = document.getElementById('occupied-slot-modal');
+  const desc  = modal.querySelector('.modal-desc');
+  const cardOf = (item, label) => {
+    if (!item) return '';
+    const src = item.card_image ? `/images/${item.card_image}` : '';
+    const img = src ? `<img class="occupied-slot-card-img" src="${src}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : '';
+    return `<div class="occupied-slot-card-wrap">
+      <div class="occupied-slot-card-label">${label}</div>
+      ${img || `<div class="no-card-placeholder">${item.name}</div>`}
+    </div>`;
+  };
+  desc.innerHTML = `
+    <div class="occupied-slot-cards">
+      ${cardOf(equippedItem, 'Currently Equipped')}
+      <div class="occupied-slot-arrow">&rarr;</div>
+      ${cardOf(newItem, 'Replacing With')}
+    </div>`;
+  const toPackBtn = modal.querySelector('button[onclick="_occupiedSlotAction(\'to_pack\')"]');
+  if (toPackBtn) toPackBtn.disabled = packSlotsFree <= 0;
+  modal.classList.remove('hidden');
+}
+
+async function _occupiedSlotAction(action) {
+  document.getElementById('occupied-slot-modal').classList.add('hidden');
+  if (action === 'cancel' || _occupiedSlotPackIndex < 0) return;
+  const body = { pack_index: _occupiedSlotPackIndex, force: action !== 'cancel', to_pack: action === 'to_pack' };
+  _occupiedSlotPackIndex = -1;
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
   applyState(data.state);
 }
 
@@ -454,10 +500,9 @@ function updateMovementHand(state) {
   handDiv.innerHTML = '';
   const currentPlayer = state.players.find(p => p.is_current);
   const viewingCurrent = viewingPlayerId === state.current_player_id;
+  // Flee (Fly, you dummy!) is now handled in the pre-fight battle scene.
   const fleeLbl = document.getElementById('flee-label');
-  if (viewingCurrent && currentPlayer && currentPlayer.hero_id === 'BILLFOLD') {
-    fleeLbl.classList.remove('hidden');
-  } else {
+  if (fleeLbl) {
     fleeLbl.classList.add('hidden');
     const tog = document.getElementById('flee-toggle');
     if (tog) tog.checked = false;
@@ -472,18 +517,30 @@ function updateMovementHand(state) {
     return;
   }
   const hand = currentPlayer ? currentPlayer.movement_hand : [];
+  const heroBonus = currentPlayer ? (currentPlayer.movement_card_bonus || 0) : 0;
   if (!hand.length) {
     handDiv.innerHTML = '<div class="hand-empty">No cards in hand.</div>';
     return;
   }
   hand.forEach((val, idx) => {
+    const dispVal = val + heroBonus;
+    const imgVal = Math.min(Math.max(dispVal, 1), 5);
     const card = document.createElement('div');
     card.className = 'mv-card';
-    card.title = `Move ${val} tile${val !== 1 ? 's' : ''} forward or backward`;
-    card.innerHTML = `<div class="mv-card-number">${val}</div><div class="mv-card-label">MOVE</div>`;
-    card.addEventListener('click', () => promptDirection(idx, val));
+    card.title = `Move ${dispVal} tile${dispVal !== 1 ? 's' : ''} forward or backward`;
+    card.innerHTML = `<img class="mv-card-img" src="/images/Movement/Movement Card ${imgVal}.png" alt="${dispVal}">`;
+    card.addEventListener('click', () => promptDirection(idx, dispVal));
     handDiv.appendChild(card);
   });
+  // Botched Circumcision indicator
+  if (currentPlayer && currentPlayer.curses &&
+      currentPlayer.curses.some(c => c.effect_id === 'botched_circumcision')) {
+    const badge = document.createElement('div');
+    badge.className = 'mv-curse-badge';
+    badge.title = 'Botched Circumcision: all movement cards −1';
+    badge.textContent = '−1';
+    handDiv.prepend(badge);
+  }
 }
 // ================================================================ LOG
 function updateLog(log) {
@@ -506,6 +563,7 @@ function updateLog(log) {
 let _pendingCardIndex = null;
 
 function promptDirection(cardIndex, cardValue) {
+  // cardValue here is already the display value (raw + hero movement bonus)
   if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
   const p = gameState.players.find(x => x.is_current);
   if (!p) return;
@@ -531,12 +589,11 @@ function cancelDirection() {
 
 async function beginMove(cardIndex, direction = 'forward') {
   if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
-  const flee = document.getElementById('flee-toggle')?.checked || false;
   const activated = Object.assign({}, abilityChoices);
   const resp = await fetch('/api/begin_move', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ card_index: cardIndex, flee, activated, direction }),
+    body: JSON.stringify({ card_index: cardIndex, flee: false, activated, direction }),
   });
   const data = await resp.json();
   if (data.state) viewingPlayerId = data.state.current_player_id;
@@ -588,7 +645,7 @@ function showChestModal(offer, tileScene) {
   const item  = offer.items[0];
   _setOfferBackground(tileScene);
   body.innerHTML = `
-    <h2 class="offer-title">Gift Chest</h2>
+    <h2 class="offer-title">Found Chest</h2>
     <div class="offer-items">${renderOfferItemCard(item, 0, true)}</div>
     <div class="offer-actions">
       <button class="btn-primary" onclick="confirmChestTake()">Take It</button>
@@ -760,6 +817,7 @@ document.addEventListener('click', () => _closeCtxMenu(), true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') _closeCtxMenu(); });
 
 function _attachCtxMenus(container) {
+  const _jsEsc = s => s.replace(/'/g, "\\'");
   container.querySelectorAll('[data-ctx="equip"]').forEach(el => {
     el.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -768,7 +826,7 @@ function _attachCtxMenus(container) {
       const name     = el.dataset.itemName || 'item';
       const imgSrc   = el.dataset.itemImage;
       const entries = [];
-      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
+      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
       entries.push({ label: 'Move to Pack', action: `manageItem('to_pack','${slotKey}',${slotIdx});_closeCtxMenu()` });
       entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','${slotKey}',${slotIdx})}_closeCtxMenu()`, danger: true });
       _showCtxMenu(e.clientX, e.clientY, entries);
@@ -782,8 +840,8 @@ function _attachCtxMenus(container) {
       const imgSrc  = el.dataset.itemImage;
       const devImg  = el.dataset.deviceImage;
       const entries = [];
-      if (imgSrc) entries.push({ label: 'View Monster Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
-      if (devImg) entries.push({ label: 'View Capture Device Card', action: `zoomCard('${devImg}');_closeCtxMenu()` });
+      if (imgSrc) entries.push({ label: 'View Monster Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
+      if (devImg) entries.push({ label: 'View Capture Device Card', action: `zoomCard('${_jsEsc(devImg)}');_closeCtxMenu()` });
       entries.push({ label: `Summon ${name}`, action: `summonCapturedMonster(${idx});_closeCtxMenu()` });
       entries.push({ label: `Release ${name}`, action: `releaseCapturedMonster(${idx});_closeCtxMenu()`, danger: true });
       _showCtxMenu(e.clientX, e.clientY, entries);
@@ -796,10 +854,17 @@ function _attachCtxMenus(container) {
       const name    = el.dataset.itemName || 'item';
       const imgSrc  = el.dataset.itemImage;
       const isConsumable = el.dataset.isConsumable === 'true';
+      const consumableIdx = parseInt(el.dataset.consumableIdx ?? '-1', 10);
       const entries = [];
-      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
+      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
       if (!isConsumable) entries.push({ label: 'Equip', action: `manageItem('to_equip','pack',${packIdx});_closeCtxMenu()` });
-      entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','pack',${packIdx})}_closeCtxMenu()`, danger: true });
+      if (isConsumable && consumableIdx >= 0) {
+        const canUseNow = gameState && !gameState.has_pending_combat;
+        if (canUseNow) entries.push({ label: `Use ${name}`, action: `_closeCtxMenu();promptUseConsumable(${consumableIdx})` });
+        entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){_discardConsumable(${consumableIdx})}_closeCtxMenu()`, danger: true });
+      } else {
+        entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','pack',${packIdx})}_closeCtxMenu()`, danger: true });
+      }
       _showCtxMenu(e.clientX, e.clientY, entries);
     });
   });
@@ -817,6 +882,90 @@ async function manageItem(action, source, idx) {
     renderPlayerSheetFull(gameState);
   } else if (data.error) {
     alert(data.error);
+  }
+}
+
+async function _discardConsumable(consumableIdx) {
+  const resp = await fetch('/api/discard_consumable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ consumable_index: consumableIdx }),
+  });
+  const data = await resp.json();
+  if (data.ok && data.state) {
+    gameState = data.state;
+    renderPlayerSheetFull(gameState);
+  } else if (data.error) {
+    alert(data.error);
+  }
+}
+
+// Use a consumable Item that's sitting in player.pack (is_consumable=true)
+async function usePackConsumable(packIndex) {
+  if (!gameState) return;
+  const p = gameState.players.find(x => x.player_id === viewingPlayerId);
+  if (!p) return;
+  const item = p.pack[packIndex];
+  if (!item) return;
+
+  // Build a fake consumable-like object so we can reuse the same confirm/target flow
+  const fakeConsumable = { name: item.name, effect_id: item.effect_id || '', card_image: item.card_image };
+  const imgHtml = item.card_image
+    ? `<img class="consumable-modal-card-img" src="/images/${item.card_image}" alt="${item.name}" onclick="zoomCard(this.src)">`
+    : '';
+  _showConsumableModal(fakeConsumable, `<div class="consumable-modal-card-wrap">${imgHtml}</div>`, [
+    { label: `Use ${item.name}`, action: () => { _closeConsumableModal(); _doUsePackConsumableConfirmed(packIndex, fakeConsumable); } },
+    { label: 'Cancel', action: () => _closeConsumableModal() },
+  ]);
+}
+
+async function _doUsePackConsumableConfirmed(packIndex, consumable) {
+  if (consumable.effect_id === 'give_curse') {
+    const allPlayers = gameState.players;
+    if (allPlayers.length === 1) {
+      await _callUsePackConsumable(packIndex, allPlayers[0].player_id);
+    } else {
+      // Reuse player picker — show all players
+      _showPlayerPickerModal(packIndex, consumable, allPlayers, true);
+    }
+    return;
+  }
+  await _callUsePackConsumable(packIndex, null);
+}
+
+async function _callUsePackConsumable(packIndex, targetPlayerId) {
+  try {
+    const body = { pack_index: packIndex };
+    if (targetPlayerId !== null && targetPlayerId !== undefined) body.target_player_id = targetPlayerId;
+    const resp = await fetch('/api/use_pack_consumable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data;
+    try { data = await resp.json(); } catch(e) { alert('Server error. Please try again.'); return; }
+    if (!data.ok) { alert(data.error || 'Failed to use consumable'); return; }
+    if (data.state) {
+      gameState = data.state;
+      viewingPlayerId = gameState.current_player_id;
+      applyState(gameState);
+    }
+    if (data.phase === 'trait_gained') {
+      _showConsumableResultModal({
+        title: '✨ Trait Gained!',
+        monsterName: data.monster_name, monsterImg: data.monster_card_image ? `/images/${data.monster_card_image}` : '',
+        resultName: data.trait_name, resultDesc: data.trait_desc || '', resultClass: 'result-trait',
+      });
+    } else if (data.phase === 'curse_given') {
+      _showConsumableResultModal({
+        title: `💀 Curse Given to ${data.target_name}!`,
+        monsterName: data.monster_name, monsterImg: data.monster_card_image ? `/images/${data.monster_card_image}` : '',
+        resultName: data.curse_name, resultDesc: data.curse_desc || '', resultClass: 'result-curse',
+      });
+    }
+    await loadAndRenderAbilities();
+  } catch(e) {
+    alert('Network error: ' + e.message);
   }
 }
 
@@ -906,11 +1055,133 @@ async function resolveOffer(choices) {
     body: JSON.stringify(choices),
   });
   const data = await resp.json();
+  if (data.state) { gameState = data.state; applyState(data.state); }
+  if (data.phase === 'rake_it_in') {
+    showRakeItInModal(data);
+    return;
+  }
   viewingPlayerId = data.state.current_player_id;
   applyState(data.state);
   _resumeTierMusic(data.state);
   await loadAndRenderAbilities();
 }
+
+// ================================================================ RAKE IT IN
+
+let _rakeItInData = null;
+let _rakeSelectedDiscardSlot = null;
+let _rakeSelectedDiscardIdx = -1;
+let _rakeSelectedShopItem = -1;
+
+function showRakeItInModal(data) {
+  _rakeItInData = data;
+  _rakeSelectedDiscardSlot = null;
+  _rakeSelectedDiscardIdx = -1;
+  _rakeSelectedShopItem = -1;
+
+  const modal = document.getElementById('rake-it-in-modal');
+  if (!modal) return;
+
+  const subType = data.sub_type || 'chest';
+  const equips = data.equips || [];
+  const shopRemaining = data.shop_remaining || [];
+
+  const equipsHtml = equips.map((e, i) => {
+    const img = e.card_image ? `<img class="rake-item-thumb" src="/images/${e.card_image}" alt="${e.name}">` : '';
+    const slot = e.slot === 'helmet' ? 'equip_helmet' : e.slot === 'chest' ? 'equip_chest' : e.slot === 'legs' ? 'equip_leg' : 'equip_weapon';
+    return `<div class="rake-equip-btn" data-slot="${slot}" data-idx="${i}" onclick="rakeSelectDiscard('${slot}',${i},this)">
+      ${img}
+      <div class="rake-item-name">${e.name}</div>
+    </div>`;
+  }).join('');
+
+  let shopHtml = '';
+  if (subType === 'shop' && shopRemaining.length > 0) {
+    shopHtml = `<div class="rake-section-label">Choose a 2nd item from the shop:</div>
+    <div class="rake-items-row">${shopRemaining.map((it, i) => {
+      const img = it.card_image ? `<img class="rake-item-thumb" src="/images/${it.card_image}" alt="${it.name}">` : '';
+      return `<div class="rake-equip-btn" data-shop-idx="${i}" onclick="rakeSelectShopItem(${i},this)">
+        ${img}
+        <div class="rake-item-name">${it.name}</div>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  const descText = subType === 'shop'
+    ? 'Discard an equipped item to take a second item from the shop!'
+    : 'Discard an equipped item to draw a bonus item from the deck!';
+
+  modal.querySelector('.rake-desc').textContent = descText;
+  modal.querySelector('.rake-equips-row').innerHTML = equipsHtml;
+  modal.querySelector('.rake-shop-section').innerHTML = shopHtml;
+  modal.classList.remove('hidden');
+}
+
+function rakeSelectDiscard(slot, idx, el) {
+  _rakeSelectedDiscardSlot = slot;
+  _rakeSelectedDiscardIdx = idx;
+  document.querySelectorAll('.rake-equip-btn[data-slot]').forEach(b => b.classList.remove('rake-selected'));
+  if (el) el.classList.add('rake-selected');
+  _updateRakeConfirmBtn();
+}
+
+function rakeSelectShopItem(idx, el) {
+  _rakeSelectedShopItem = idx;
+  document.querySelectorAll('.rake-equip-btn[data-shop-idx]').forEach(b => b.classList.remove('rake-selected'));
+  if (el) el.classList.add('rake-selected');
+  _updateRakeConfirmBtn();
+}
+
+function _updateRakeConfirmBtn() {
+  const btn = document.getElementById('rake-confirm-btn');
+  if (!btn || !_rakeItInData) return;
+  const subType = _rakeItInData.sub_type || 'chest';
+  const discardOk = _rakeSelectedDiscardSlot !== null && _rakeSelectedDiscardIdx >= 0;
+  const shopOk = subType !== 'shop' || _rakeSelectedShopItem >= 0;
+  btn.disabled = !(discardOk && shopOk);
+}
+
+async function resolveRakeItIn(useIt) {
+  const modal = document.getElementById('rake-it-in-modal');
+  if (modal) modal.classList.add('hidden');
+
+  const body = { use_it: useIt };
+  if (useIt) {
+    body.discard_slot = _rakeSelectedDiscardSlot;
+    body.discard_idx  = _rakeSelectedDiscardIdx;
+    if (_rakeItInData && _rakeItInData.sub_type === 'shop') {
+      body.second_item_choice = _rakeSelectedShopItem;
+    }
+  }
+
+  const resp = await fetch('/api/resolve_rake_it_in', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  _rakeItInData = null;
+  if (data.state) {
+    gameState = data.state;
+    viewingPlayerId = gameState.current_player_id;
+    applyState(data.state);
+    _resumeTierMusic(data.state);
+  }
+  if (data.bonus_item) {
+    const bi = data.bonus_item;
+    const img = bi.card_image ? `<img class="consumable-modal-card-img" src="/images/${bi.card_image}" alt="${bi.name}" onclick="zoomCard(this.src)">` : '';
+    _showConsumableResultModal({
+      title: '🎁 Rake It In! Bonus Item',
+      monsterName: '',
+      monsterImg: '',
+      resultName: bi.name,
+      resultDesc: `+${bi.strength_bonus} Str — added to your pack.`,
+      resultClass: 'result-trait',
+    });
+  }
+  await loadAndRenderAbilities();
+}
+
 // ================================================================ APPLY STATE
 function applyState(state) {
   gameState = state;
@@ -1013,8 +1284,110 @@ let _preFightCombat = null;
 
 function showPreFightScene(combat, state) {
   _preFightCombat = combat;
-  _renderPreFightScene(combat, state);
+  // If there are nearby bystanders who can use consumables, show their screens first
+  const queue = combat.nearby_queue || [];
+  if (queue.length > 0) {
+    _renderBystanderScreen(queue[0], combat, state);
+  } else {
+    _renderPreFightScene(combat, state);
+  }
 }
+
+// ---------------------------------------------------------------- BYSTANDER CONSUMABLE SCREEN
+
+function _renderBystanderScreen(bystander, combat, state) {
+  const overlay = document.getElementById('battle-overlay');
+  const bg = combat.background ? `/images/${combat.background}` : '';
+  const fightingPlayer = state.players.find(x => x.player_id === combat.player_id) || state.players[0];
+  const monsterImg = combat.card_image ? `/images/${combat.card_image}` : '';
+
+  const tokenSrc = bystander.token_image ? `/images/${bystander.token_image}` : '';
+  const consumables = bystander.consumables || [];
+
+  const consumableHtml = consumables.length === 0
+    ? '<div class="prefight-no-consumables">No applicable consumables</div>'
+    : consumables.map((c, i) => {
+        const sign = c.effect_value >= 0 ? '+' : '';
+        const bonusText = c.effect_id === 'monster_str_mod'
+          ? `${sign}${c.effect_value} Monster STR`
+          : c.name;
+        return `<div class="prefight-consumable">
+          ${c.card_image ? `<img class="prefight-consumable-img" src="/images/${c.card_image}" alt="${c.name}" onclick="zoomCard(this.src)">` : ''}
+          <div class="prefight-consumable-info">
+            <div class="prefight-consumable-name">${c.name}</div>
+            <div class="prefight-consumable-bonus">${bonusText}</div>
+          </div>
+          <button class="btn-use-consumable" onclick="doBystanderUse(${bystander.player_id}, ${i})">Use</button>
+        </div>`;
+      }).join('');
+
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div class="battle-content">
+      <div class="battle-main">
+        <div class="battle-title" style="font-size:1rem;letter-spacing:2px;color:var(--gold-dim)">BEFORE THE FIGHT…</div>
+        <div class="bystander-banner">
+          ${tokenSrc ? `<img class="bystander-token" src="${tokenSrc}" alt="${bystander.name}">` : ''}
+          <span class="bystander-name">${bystander.name}'s Turn</span>
+        </div>
+        <div class="bystander-subtitle">
+          Use a consumable on <strong>${combat.monster_name}</strong>
+          (STR ${combat.monster_strength}) or skip.
+        </div>
+        ${monsterImg ? `<div style="text-align:center;margin:8px 0">
+          <img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" style="max-height:160px" onclick="zoomCard(this.src)">
+        </div>` : ''}
+        <div class="prefight-consumables-section">
+          <div class="prefight-consumables-title">${bystander.name}'s Consumables</div>
+          <div class="prefight-consumables-list">${consumableHtml}</div>
+        </div>
+        <div class="battle-actions">
+          <button class="btn-secondary" onclick="doBystanderSkip(${bystander.player_id})">Skip</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  attachCardPreviews(overlay);
+}
+
+async function doBystanderUse(bystanderId, consumableIndex) {
+  const resp = await fetch('/api/bystander_consumable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ player_id: bystanderId, consumable_index: consumableIndex, skip: false }),
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) gameState = data.state;
+  const updatedCombat = data.combat_info || _preFightCombat;
+  _preFightCombat = updatedCombat;
+  _advanceBystanderQueue(updatedCombat);
+}
+
+async function doBystanderSkip(bystanderId) {
+  const resp = await fetch('/api/bystander_consumable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ player_id: bystanderId, skip: true }),
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) gameState = data.state;
+  const updatedCombat = data.combat_info || _preFightCombat;
+  _preFightCombat = updatedCombat;
+  _advanceBystanderQueue(updatedCombat);
+}
+
+function _advanceBystanderQueue(combat) {
+  const queue = combat.nearby_queue || [];
+  if (queue.length > 0) {
+    _renderBystanderScreen(queue[0], combat, gameState);
+  } else {
+    _renderPreFightScene(combat, gameState);
+  }
+}
+
+// ---------------------------------------------------------------- NORMAL PRE-FIGHT SCREEN
 
 function _renderPreFightScene(combat, state) {
   const overlay = document.getElementById('battle-overlay');
@@ -1030,14 +1403,19 @@ function _renderPreFightScene(combat, state) {
   if (consumables.length === 0) {
     consumableHtml = '<div class="prefight-no-consumables">No consumables available</div>';
   } else {
-    consumableHtml = consumables.map((c, i) => {
+    // Only show combat-relevant consumables in pre-fight (not gain_trait / give_curse — those are for overworld use)
+    const combatConsumables = consumables.map((c, i) => ({c, i}))
+      .filter(({c}) => c.strength_bonus > 0 || c.effect_id === 'monster_str_mod' || c.effect_id === 'capture_monster');
+    if (combatConsumables.length === 0) {
+      consumableHtml = '<div class="prefight-no-consumables">No combat consumables available</div>';
+    } else {
+    consumableHtml = combatConsumables.map(({c, i}) => {
       let bonusText = '';
       if (c.strength_bonus > 0) bonusText = `+${c.strength_bonus} STR`;
-      else if (c.effect_id === 'monster_str_mod') bonusText = `Weakens monster STR`;
+      else if (c.effect_id === 'monster_str_mod') bonusText = c.effect_value > 0 ? `+${c.effect_value} Monster STR` : `${c.effect_value} Monster STR`;
       else if (c.effect_id === 'capture_monster') bonusText = `Captures Monster (Tier ${c.effect_tier || '?'})`;
-      else if (c.effect_id) bonusText = 'Special Effect';
       return `<div class="prefight-consumable">
-        ${c.card_image ? `<img class="prefight-consumable-img" src="/images/${c.card_image}" alt="${c.name}" onclick="zoomCard('/images/${c.card_image}')">` : ''}
+        ${c.card_image ? `<img class="prefight-consumable-img" src="/images/${c.card_image}" alt="${c.name}" onclick="zoomCard(this.src)">` : ''}
         <div class="prefight-consumable-info">
           <div class="prefight-consumable-name">${c.name}</div>
           ${bonusText ? `<div class="prefight-consumable-bonus">${bonusText}</div>` : ''}
@@ -1045,10 +1423,20 @@ function _renderPreFightScene(combat, state) {
         <button class="btn-use-consumable" onclick="useConsumable(${i})">Use</button>
       </div>`;
     }).join('');
+    }
   }
 
   const gearPanelHtml = _buildBattleGearSection(combat);
   const strTitle = _strBreakdownTitle(combat);
+
+  // Billfold: "Fly, you dummy!" flee button (monsters & minibosses only)
+  const canFlee = (combat.category === 'monster' || combat.category === 'miniboss')
+    && combat.hero_id === 'BILLFOLD';
+  const fleeTokenSrc = p && p.token_image ? `/images/${p.token_image}` : '';
+  const fleeBtnHtml = canFlee ? `<div class="billfold-flee-box" title="From: Fly, You Dummy!" onclick="doFlee()">
+    ${fleeTokenSrc ? `<img class="flee-token-img" src="${fleeTokenSrc}" alt="Billfold">` : ''}
+    <button type="button" class="btn-flee">Flee back 13 spaces?</button>
+  </div>` : '';
 
   overlay.innerHTML = `
     <div class="battle-bg" style="background-image: url('${bg}')"></div>
@@ -1067,7 +1455,7 @@ function _renderPreFightScene(combat, state) {
           <div class="battle-side">
             ${monsterImg ? `<img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
             <div class="battle-name">${combat.monster_name}</div>
-            <div class="battle-str">STR ${combat.monster_strength}</div>
+            <div class="battle-str" title="${_monsterStrBreakdownTitle(combat)}" style="cursor:help">STR ${combat.monster_strength}</div>
           </div>
         </div>
         <div class="prefight-consumables-section">
@@ -1077,17 +1465,91 @@ function _renderPreFightScene(combat, state) {
           </div>
         </div>
         ${combat.ill_come_in_again_available ? `<div class="ill-come-in-again-section">
-          <button class="btn-secondary" onclick="useIllComeInAgain()" title="Send this monster back and draw a new one (once per encounter)">
-            &#x21BA; I'll Come In Again!
+          <button class="btn-secondary" onclick="useIllComeInAgain()" title="Send this monster back and draw a new one">
+            &#x21BA; ${_rerollTraitLabel(p)}
           </button>
         </div>` : ''}
         <div class="battle-actions">
           <button class="btn-primary btn-fight" onclick="doFight()">&#x2694; Fight!</button>
+          ${fleeBtnHtml}
         </div>
       </div>
     </div>`;
   overlay.classList.remove('hidden');
   attachCardPreviews(overlay);
+}
+
+let _pendingFleeState = null;
+
+async function doFlee() {
+  try {
+    const resp = await fetch('/api/flee', { method: 'POST' });
+    let rawText, data;
+    try { rawText = await resp.text(); } catch(e) { alert('Network error during flee: ' + e.message); return; }
+    try {
+      data = JSON.parse(rawText);
+    } catch(e) {
+      alert('Server error during flee:\n' + rawText.substring(0, 400));
+      return;
+    }
+    if (data.error) { alert(data.error); return; }
+    // Show "You Fled!" screen instead of immediately returning to board
+    _pendingFleeState = data.state || null;
+    const overlay = document.getElementById('battle-overlay');
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <div class="battle-content fled-screen">
+        <div class="fled-title">&#x1F3C3; You Fled!</div>
+        <div class="fled-msg">No trait or curse gained.</div>
+        <button class="btn-primary" style="margin-top:24px" onclick="_finishFlee()">Continue</button>
+      </div>`;
+  } catch(e) {
+    alert('Network error during flee: ' + e.message);
+  }
+}
+
+function _finishFlee() {
+  const overlay = document.getElementById('battle-overlay');
+  overlay.classList.add('hidden');
+  overlay.innerHTML = '';  // reset for next battle render
+  if (_pendingFleeState) {
+    const prev = gameState?.players?.find(x => x.is_current);
+    const next = _pendingFleeState?.players?.find(x => x.is_current);
+    gameState = _pendingFleeState;
+    viewingPlayerId = gameState.current_player_id;
+    applyState(gameState);
+    _resumeTierMusic();
+    loadAndRenderAbilities();
+    // Show "moved back" notification
+    if (prev && next && prev.position !== next.position) {
+      const moved = prev.position - next.position;
+      if (moved > 0) {
+        setTimeout(() => {
+          const msg = document.createElement('div');
+          msg.className = 'flee-move-notice';
+          msg.innerHTML = `
+            <div class="flee-move-box">
+              <div class="flee-move-title">Moved back ${moved} space${moved !== 1 ? 's' : ''}!</div>
+              <div class="flee-move-sub">Tile ${prev.position} → Tile ${next.position}</div>
+              <button class="btn-primary" onclick="this.closest('.flee-move-notice').remove()">Continue</button>
+            </div>`;
+          document.body.appendChild(msg);
+        }, 300);
+      }
+    }
+    _pendingFleeState = null;
+  }
+}
+
+function _rerollTraitLabel(player) {
+  if (!player) return "I'll Come In Again!";
+  const traits = (player.traits || []).filter(t =>
+    t.effect_id === 'i_see_everything' || t.effect_id === 'ill_come_in_again'
+  );
+  if (traits.length === 0) return "Reroll Monster";
+  // Show the first matching trait's name; if multiple, show both
+  if (traits.length === 1) return traits[0].name;
+  return traits.map(t => t.name).join(' / ');
 }
 
 async function useIllComeInAgain() {
@@ -1126,6 +1588,182 @@ async function useConsumable(idx) {
     _preFightCombat = data.combat_info;
     _renderPreFightScene(data.combat_info, data.state);
   }
+}
+
+// ================================================================ CONSUMABLE USE (OVERWORLD)
+// promptUseConsumable: left-click handler — shows confirm then routes by type
+
+function promptUseConsumable(idx) {
+  if (!gameState) return;
+  const p = gameState.players.find(x => x.player_id === viewingPlayerId);
+  if (!p) return;
+  const c = p.consumables[idx];
+  if (!c) return;
+
+  // Combat-only consumables can't be used from the pack outside of combat
+  const combatOnly = c.effect_id === 'monster_str_mod' || c.effect_id === 'capture_monster'
+    || (c.effect_id === '' && c.strength_bonus > 0);
+  if (combatOnly) {
+    _showConsumableModal(c, '<p class="consumable-modal-msg">This consumable can only be used during combat.</p>',
+      [{label: 'OK', action: () => _closeConsumableModal()}]);
+    return;
+  }
+
+  // Confirm use
+  const imgHtml = c.card_image
+    ? `<img class="consumable-modal-card-img" src="/images/${c.card_image}" alt="${c.name}" onclick="zoomCard(this.src)">`
+    : '';
+  _showConsumableModal(c, `<div class="consumable-modal-card-wrap">${imgHtml}</div>`, [
+    { label: `Use ${c.name}`, action: () => { _closeConsumableModal(); _doUseConsumableConfirmed(idx, c); } },
+    { label: 'Cancel', action: () => _closeConsumableModal() },
+  ]);
+}
+
+async function _doUseConsumableConfirmed(idx, consumable) {
+  if (consumable.effect_id === 'give_curse') {
+    // Need a player target — show all players (including self as option)
+    const allPlayers = gameState.players;
+    if (allPlayers.length === 0) {
+      alert('No players available!');
+      return;
+    }
+    if (allPlayers.length === 1) {
+      // Only self — use on self
+      await _callUseConsumableOverworld(idx, allPlayers[0].player_id);
+    } else {
+      _showPlayerPickerModal(idx, consumable, allPlayers);
+    }
+    return;
+  }
+  // gain_trait (Blessings/Nectar) and anything else: call directly
+  await _callUseConsumableOverworld(idx, null);
+}
+
+async function _callUseConsumableOverworld(idx, targetPlayerId) {
+  try {
+    const body = { consumable_index: idx };
+    if (targetPlayerId !== null && targetPlayerId !== undefined) body.target_player_id = targetPlayerId;
+    const resp = await fetch('/api/use_consumable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    let data;
+    try { data = await resp.json(); } catch(e) { alert('Server error. Please try again.'); return; }
+    if (!data.ok) { alert(data.error || 'Failed to use consumable'); return; }
+    if (data.state) {
+      gameState = data.state;
+      viewingPlayerId = gameState.current_player_id;
+      applyState(gameState);
+    }
+    if (data.phase === 'trait_gained') {
+      _showConsumableResultModal({
+        title: '✨ Trait Gained!',
+        monsterName:  data.monster_name,
+        monsterImg:   data.monster_card_image ? `/images/${data.monster_card_image}` : '',
+        resultName:   data.trait_name,
+        resultDesc:   data.trait_desc || '',
+        resultClass:  'result-trait',
+      });
+    } else if (data.phase === 'curse_given') {
+      _showConsumableResultModal({
+        title: `💀 Curse Given to ${data.target_name}!`,
+        monsterName: data.monster_name,
+        monsterImg:  data.monster_card_image ? `/images/${data.monster_card_image}` : '',
+        resultName:  data.curse_name,
+        resultDesc:  data.curse_desc || '',
+        resultClass: 'result-curse',
+      });
+    }
+    await loadAndRenderAbilities();
+  } catch(e) {
+    alert('Network error: ' + e.message);
+  }
+}
+
+// Legacy alias used in pre-fight screen - now routed through confirmDialog
+async function useConsumableOverworld(idx) {
+  await _callUseConsumableOverworld(idx, null);
+}
+
+// ---------------------------------------------------------------- CONSUMABLE MODALS
+
+let _consumableModalEl = null;
+function _getConsumableModal() {
+  if (!_consumableModalEl) {
+    _consumableModalEl = document.createElement('div');
+    _consumableModalEl.id = 'consumable-modal';
+    _consumableModalEl.className = 'consumable-modal-overlay hidden';
+    document.body.appendChild(_consumableModalEl);
+  }
+  return _consumableModalEl;
+}
+
+function _showConsumableModal(consumable, bodyHtml, buttons) {
+  const el = _getConsumableModal();
+  const btnHtml = buttons.map((b, i) =>
+    `<button class="btn-${i === 0 ? 'primary' : 'secondary'}" onclick="_consumableModalBtns[${i}]()">${b.label}</button>`
+  ).join('');
+  el.innerHTML = `<div class="consumable-modal-box">
+    <h3 class="consumable-modal-title">${consumable.name}</h3>
+    ${bodyHtml}
+    <div class="consumable-modal-actions">${btnHtml}</div>
+  </div>`;
+  window._consumableModalBtns = buttons.map(b => b.action);
+  el.classList.remove('hidden');
+}
+
+function _closeConsumableModal() {
+  const el = _getConsumableModal();
+  el.classList.add('hidden');
+}
+
+function _showConsumableResultModal({ title, monsterName, monsterImg, resultName, resultDesc, resultClass }) {
+  const el = _getConsumableModal();
+  const mImg = monsterImg ? `<img class="consumable-modal-card-img" src="${monsterImg}" alt="${monsterName}" onclick="zoomCard(this.src)">` : '';
+  el.innerHTML = `<div class="consumable-modal-box">
+    <h3 class="consumable-modal-title">${title}</h3>
+    ${monsterName ? `<div class="consumable-result-from">Drew: <strong>${monsterName}</strong></div>` : ''}
+    ${mImg}
+    <div class="consumable-result-name ${resultClass}">${resultName}</div>
+    ${resultDesc ? `<div class="consumable-result-desc">${resultDesc}</div>` : ''}
+    <div class="consumable-modal-actions">
+      <button class="btn-primary" onclick="_closeConsumableModal()">OK</button>
+    </div>
+  </div>`;
+  window._consumableModalBtns = [];
+  el.classList.remove('hidden');
+}
+
+function _showPlayerPickerModal(consumableIdx, consumable, players, isPackItem) {
+  const el = _getConsumableModal();
+  const btns = players.map((pl) => {
+    const label = pl.player_id === viewingPlayerId ? `${pl.name} (You)` : pl.name;
+    const onclick = isPackItem
+      ? `_pickPlayerForPackCurse(${consumableIdx}, ${pl.player_id})`
+      : `_pickPlayerForCurse(${consumableIdx}, ${pl.player_id})`;
+    return `<button class="btn-secondary player-pick-btn" onclick="${onclick}">${label}</button>`;
+  }).join('');
+  el.innerHTML = `<div class="consumable-modal-box">
+    <h3 class="consumable-modal-title">${consumable.name}</h3>
+    <p class="consumable-modal-msg">Choose a player to receive the curse:</p>
+    <div class="consumable-modal-actions">${btns}</div>
+    <div class="consumable-modal-actions" style="margin-top:8px">
+      <button class="btn-secondary" onclick="_closeConsumableModal()">Cancel</button>
+    </div>
+  </div>`;
+  window._consumableModalBtns = [];
+  el.classList.remove('hidden');
+}
+
+async function _pickPlayerForCurse(consumableIdx, targetPlayerId) {
+  _closeConsumableModal();
+  await _callUseConsumableOverworld(consumableIdx, targetPlayerId);
+}
+
+async function _pickPlayerForPackCurse(packIndex, targetPlayerId) {
+  _closeConsumableModal();
+  await _callUsePackConsumable(packIndex, targetPlayerId);
 }
 
 async function doFight() {
@@ -1180,7 +1818,7 @@ function showBattleScene(combat, state) {
           <div class="battle-side">
             ${monsterImg ? `<img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
             <div class="battle-name">${combat.monster_name}</div>
-            <div class="battle-str">STR ${combat.monster_strength}</div>
+            <div class="battle-str" title="${_monsterStrBreakdownTitle(combat)}" style="cursor:help">STR ${combat.monster_strength}</div>
           </div>
         </div>
         ${resultText ? `<div class="battle-result ${resultClass}">${resultText}</div>` : ''}
@@ -1255,18 +1893,42 @@ function renderPlayerSheet(state) {
   if (_playerSheetOpen) renderPlayerSheetFull(state);
 }
 
+function _playerStrBreakdown(p) {
+  const lines = [];
+  if (p.base_strength !== undefined) lines.push(`Base: ${p.base_strength}`);
+  const gear = [...(p.helmets||[]), ...(p.chest_armor||[]), ...(p.leg_armor||[]), ...(p.weapons||[])];
+  for (const item of gear) {
+    if (item.strength_bonus) lines.push(`${item.name}: ${item.strength_bonus >= 0 ? '+' : ''}${item.strength_bonus}`);
+    if (item.tokens) lines.push(`  ${item.name} (effect): +${item.tokens}`);
+  }
+  for (const t of (p.traits||[])) {
+    if (t.strength_bonus) lines.push(`${t.name}: ${t.strength_bonus >= 0 ? '+' : ''}${t.strength_bonus}`);
+    if (t.tokens) lines.push(`${t.name} (effect): +${t.tokens}`);
+  }
+  for (const m of (p.minions||[])) {
+    if (m.strength_bonus) lines.push(`${m.name} (minion): +${m.strength_bonus}`);
+  }
+  for (const c of (p.curses||[])) {
+    if (c.strength_bonus) lines.push(`${c.name}: ${c.strength_bonus >= 0 ? '+' : ''}${c.strength_bonus}`);
+    if (c.tokens) lines.push(`${c.name} (effect): ${c.tokens >= 0 ? '+' : ''}${c.tokens}`);
+  }
+  lines.push(`Total: ${p.strength}`);
+  return lines.join('\n');
+}
+
 function renderPlayerSheetMini(p) {
   const mini = document.getElementById('player-sheet-mini');
   if (!mini) return;
   const imgHtml = p.hero_card_image
     ? `<img class="ps-mini-hero-thumb" src="/images/${p.hero_card_image}" alt="${p.name}">`
     : '';
+  const strBreak = _playerStrBreakdown(p).replace(/"/g, '&quot;');
   mini.innerHTML = `
     <div class="ps-mini-content" onclick="openPlayerSheet()" title="Open player sheet">
       ${imgHtml}
       <div class="ps-mini-info">
         <div class="ps-mini-name">${p.name}</div>
-        <div class="ps-mini-str">STR ${p.strength}</div>
+        <div class="ps-mini-str" title="${strBreak}" style="cursor:help">STR ${p.strength}</div>
         <div class="ps-mini-hint">View Sheet</div>
       </div>
     </div>`;
@@ -1295,7 +1957,7 @@ function renderPlayerSheetFull(state) {
   // ---- Pack slots ----
   const packItems = [
     ...p.pack.map((i, realIdx) => ({ label: i.name, sub: (i.strength_bonus >= 0 ? '+' : '') + i.strength_bonus + ' Str', card_image: i.card_image, realPackIdx: realIdx, isConsumable: i.is_consumable || false, isCapturedMonster: false })),
-    ...(p.consumables || []).map(c => ({ label: c.name, sub: 'Consumable', card_image: c.card_image, realPackIdx: -1, isConsumable: true, isCapturedMonster: false })),
+    ...(p.consumables || []).map((c, ci) => ({ label: c.name, sub: 'Consumable', card_image: c.card_image, realPackIdx: -1, isConsumable: true, isCapturedMonster: false, consumableIdx: ci, effectId: c.effect_id })),
     ...(p.captured_monsters || []).map((m, ci) => ({ label: m.name, sub: 'Captured Monster', card_image: m.card_image, realPackIdx: -1, isConsumable: false, isCapturedMonster: true, capturedMonsterIdx: ci, level: m.level || 1 })),
   ];
   const totalPackSlots = Math.max(p.pack_size || 3, packItems.length);
@@ -1317,17 +1979,19 @@ function renderPlayerSheetFull(state) {
     } else if (item && item.card_image) {
       const previewClass = inPlacement ? '' : ' has-card-preview';
       const previewData = inPlacement ? '' : `data-card-image="/images/${item.card_image}"`;
+      const canUseConsumable = !inPlacement && item.isConsumable && (item.consumableIdx ?? -1) >= 0 && gameState && !gameState.has_pending_combat;
+      const consumableClickAttr = canUseConsumable ? ` onclick="promptUseConsumable(${item.consumableIdx})" title="Click to use ${(item.label||'').replace(/"/g,'&quot;')}" style="cursor:pointer"` : '';
       const ctxAttr = inPlacement
         ? `onclick="_psPlacePack(${i})" title="Pack here — discard ${(item.label || '').replace(/"/g, '&quot;')}"`
-        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="/images/${item.card_image}" data-is-consumable="${item.isConsumable}"`;
-      packHtml += `<div class="ps-slot ps-slot-card${placementClass}${previewClass}" ${previewData} ${ctxAttr}>
+        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="/images/${item.card_image}" data-is-consumable="${item.isConsumable}" data-consumable-idx="${item.consumableIdx ?? -1}" data-effect-id="${item.effectId || ''}"`;
+      packHtml += `<div class="ps-slot ps-slot-card${placementClass}${previewClass}" ${previewData} ${ctxAttr}${consumableClickAttr}>
         <div class="ps-slot-label">Pack</div>
         <img class="ps-slot-card-img" src="/images/${item.card_image}" alt="${item.label}">
       </div>`;
     } else if (item) {
       const ctxAttr = inPlacement
         ? `onclick="_psPlacePack(${i})" title="Pack here — discard ${(item.label || '').replace(/"/g, '&quot;')}"`
-        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="" data-is-consumable="${item.isConsumable}"`;
+        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="" data-is-consumable="${item.isConsumable}" data-consumable-idx="${item.consumableIdx ?? -1}" data-effect-id="${item.effectId || ''}"`;
       packHtml += `<div class="ps-slot ps-slot-filled${placementClass}" ${ctxAttr}>
         <div class="ps-slot-label">Pack</div>
         <div class="ps-slot-divider"></div>
@@ -1421,14 +2085,15 @@ function renderPlayerSheetFull(state) {
           ${minionHtml}
         </div>
         <div id="ps-center">
+          <div class="ps-center-str" title="${_playerStrBreakdown(p).replace(/"/g, '&quot;')}" style="cursor:help">STR ${p.strength}</div>
           <div id="ps-hero-area">${heroHtml}</div>
           ${tcRowHtml}
         </div>
         <div id="ps-right">${equipHtml}</div>
       </div>
     </div>`;
+  attachCardPreviews(overlay);
   if (!inPlacement) {
-    attachCardPreviews(overlay);
     _attachCtxMenus(overlay);
   }
 }
@@ -1447,56 +2112,74 @@ function _psSlotCell(label, item, slotKey, slotIdx) {
     const placementAttr  = slotMatch
       ? `onclick="_psPlaceEquipDiscard('${slotKey}', ${slotIdx})" title="Equip here — replace ${safeName}"`
       : (inPlacement ? '' : `data-ctx="equip" data-slot-key="${slotKey}" data-slot-idx="${slotIdx}" data-item-name="${safeName}" data-item-image="${imgSrc || ''}"`);
-    const previewAttrs = (!inPlacement && imgSrc)
+    // Show card preview even in placement mode so user can check Str of existing items
+  const previewAttrs = imgSrc
       ? `class="ps-slot ps-slot-card${placementClass} has-card-preview" data-card-image="${imgSrc}"` : null;
     if (imgSrc) {
       const cls = previewAttrs
         ? previewAttrs
         : `class="ps-slot ps-slot-card${placementClass}"`;
-      return `<div class="ps-equip-cell"><div ${cls} ${placementAttr}>
-        <div class="ps-slot-label">${label}</div>
-        <img class="ps-slot-card-img" src="${imgSrc}" alt="${item.name}">
-      </div></div>`;
+      return `<div class="ps-equip-cell">
+        <div class="ps-slot-title-above">${label}</div>
+        <div ${cls} ${placementAttr}>
+          <img class="ps-slot-card-img" src="${imgSrc}" alt="${item.name}">
+        </div></div>`;
     }
     const strSign = item.strength_bonus >= 0 ? '+' : '';
     const badges = item.tokens ? ' ' + tokenBadges(item.tokens) : '';
-    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-filled${placementClass}" ${placementAttr}>
-      <div class="ps-slot-label">${label}</div>
-      <div class="ps-slot-divider"></div>
-      <div class="ps-slot-name">${item.name}${badges}</div>
-      <div class="ps-slot-sub">${strSign}${item.strength_bonus} Str</div>
-    </div></div>`;
+    return `<div class="ps-equip-cell">
+      <div class="ps-slot-title-above">${label}</div>
+      <div class="ps-slot ps-slot-filled${placementClass}" ${placementAttr}>
+        <div class="ps-slot-divider"></div>
+        <div class="ps-slot-name">${item.name}${badges}</div>
+        <div class="ps-slot-sub">${strSign}${item.strength_bonus} Str</div>
+      </div></div>`;
   }
   // Empty slot
   if (slotMatch) {
-    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-empty ps-slot-placement-target" onclick="_psPlaceEquip()" title="Equip here"><div class="ps-slot-label">${label}</div></div></div>`;
+    return `<div class="ps-equip-cell">
+      <div class="ps-slot-title-above">${label}</div>
+      <div class="ps-slot ps-slot-empty ps-slot-placement-target" onclick="_psPlaceEquip()" title="Equip here"></div>
+    </div>`;
   }
-  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-empty"><div class="ps-slot-label">${label}</div></div></div>`;
+  return `<div class="ps-equip-cell">
+    <div class="ps-slot-title-above">${label}</div>
+    <div class="ps-slot ps-slot-empty"></div>
+  </div>`;
 }
 
 const _psEmptyCell = '<div class="ps-equip-cell"></div>';
 
 function _ps2HGhostSlot(weapon) {
+  return _ps2HGhostSlot_labeled(weapon, 'L. Hand');
+}
+
+function _ps2HGhostSlot_labeled(weapon, label) {
   const imgSrc = weapon && weapon.card_image ? `/images/${weapon.card_image}` : null;
   if (imgSrc) {
-    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-card ps-slot-ghost">
-      <div class="ps-slot-label">L. Hand</div>
-      <img class="ps-slot-card-img" src="${imgSrc}" alt="${weapon.name} (2H)">
-    </div></div>`;
+    return `<div class="ps-equip-cell">
+      <div class="ps-slot-title-above">${label}</div>
+      <div class="ps-slot ps-slot-card ps-slot-ghost">
+        <img class="ps-slot-card-img" src="${imgSrc}" alt="${weapon.name} (2H)">
+      </div></div>`;
   }
-  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-ghost">
-    <div class="ps-slot-label">L. Hand (2H)</div>
-  </div></div>`;
+  return `<div class="ps-equip-cell">
+    <div class="ps-slot-title-above">${label} (2H)</div>
+    <div class="ps-slot ps-slot-ghost"></div>
+  </div>`;
 }
 
 function _psDisabledChestCell() {
-  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-disabled"><div class="ps-slot-label">Chest</div></div></div>`;
+  return `<div class="ps-equip-cell">
+    <div class="ps-slot-title-above">Chest</div>
+    <div class="ps-slot ps-slot-disabled"></div>
+  </div>`;
 }
 
 function _buildEquipGrid(p) {
   const helmetSlots = p.helmet_slots || 1;
   const chestSlots  = p.chest_slots  || 0;
-  const legSlots    = p.legs_slots   || 1;
+  const legSlots    = p.legs_slots != null ? p.legs_slots : 1;
   const weaponHands = p.weapon_hands || 2;
   const handRows    = Math.ceil(weaponHands / 2);
   const extraRows   = Math.max(Math.max(chestSlots, 1) - 1, handRows - 1);
@@ -1526,20 +2209,32 @@ function _buildEquipGrid(p) {
   rows.push(`<div class="ps-equip-row">${r0}${chestCell0}${l0}</div>`);
 
   // Extra rows — blend extra hand pairs with extra chest slots
+  // Apply 2H ghost logic: if a right-hand weapon uses 2 hands, show ghost in left-hand slot
   for (let i = 0; i < extraRows; i++) {
     const rIdx    = (i + 1) * 2;
     const lIdx    = (i + 1) * 2 + 1;
     const cIdx    = i + 1;
     const rLabel  = `Hand ${rIdx + 1}`;
     const lLabel  = `Hand ${lIdx + 1}`;
-    const rCell   = rIdx < weaponHands ? _psSlotCell(rLabel, p.weapons[rIdx] || null, 'equip_weapon', rIdx) : _psEmptyCell;
+    const rWeapon = rIdx < weaponHands ? (p.weapons[rIdx] || null) : null;
+    const rCell   = rIdx < weaponHands ? _psSlotCell(rLabel, rWeapon, 'equip_weapon', rIdx) : _psEmptyCell;
     const cCell   = cIdx < chestSlots  ? _psSlotCell('Chest', p.chest_armor[cIdx] || null, 'equip_chest', cIdx) : _psEmptyCell;
-    const lCell   = lIdx < weaponHands ? _psSlotCell(lLabel, p.weapons[lIdx] || null, 'equip_weapon', lIdx) : _psEmptyCell;
+    let lCell;
+    if (lIdx < weaponHands) {
+      // Show ghost if right-hand weapon in this row is 2H
+      lCell = (rWeapon && rWeapon.hands === 2)
+        ? _ps2HGhostSlot_labeled(rWeapon, lLabel)
+        : _psSlotCell(lLabel, p.weapons[lIdx] || null, 'equip_weapon', lIdx);
+    } else {
+      lCell = _psEmptyCell;
+    }
     rows.push(`<div class="ps-equip-row">${rCell}${cCell}${lCell}</div>`);
   }
 
-  // Main feet row
-  rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Feet', p.leg_armor[0] || null, 'equip_leg', 0)}${_psEmptyCell}</div>`);
+  // Main feet row (only if leg slot exists)
+  if (legSlots > 0) {
+    rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Feet', p.leg_armor[0] || null, 'equip_leg', 0)}${_psEmptyCell}</div>`);
+  }
 
   // Extra feet slots — below main feet
   for (let i = 1; i < legSlots; i++) {
@@ -1763,6 +2458,20 @@ function _buildBattleGearSection(combat) {
     }
   }
   return html;
+}
+
+function _monsterStrBreakdownTitle(combat) {
+  const lines = [];
+  // Derive base from total minus modifiers
+  const abilityMod = combat.ability_monster_mod || 0;
+  const baseSt = (combat.monster_strength || 0) - abilityMod;
+  lines.push(`Base: ${baseSt}`);
+  for (const line of (combat.ability_breakdown || [])) {
+    const t = line.trim();
+    if (t) lines.push(t);
+  }
+  lines.push(`Total: ${combat.monster_strength}`);
+  return lines.join('\n');
 }
 
 function _strBreakdownTitle(combat) {

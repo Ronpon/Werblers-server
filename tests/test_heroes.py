@@ -148,32 +148,22 @@ class TestBillfold:
     def _make_game(self, **kw):
         return Game(num_players=1, hero_ids=[HeroId.BILLFOLD], seed=42, **kw)
 
-    def test_shop_draws_3_items(self):
-        """All heroes (including Billfold) draw exactly 3 items from a shop."""
+    def test_shop_draws_hero_count_items(self):
+        """encounter_shop uses the hero's shop_draw_count (Billfold draws 4)."""
+        from werblers_engine import encounters as enc
         game = self._make_game()
         p = game.player
         p.traits.append(Trait("Dummy", strength_bonus=0))
 
         items_before = game.item_decks[1].remaining()
-        # Find a shop tile
-        shop_tile = None
-        for tile in game.board[1:30]:
-            if tile.tile_type == TileType.SHOP:
-                shop_tile = tile
-                break
-        if shop_tile is None:
-            pytest.skip("No shop tile in level 1 with this seed")
-
-        p.position = shop_tile.index - 1
-        p.movement_hand = [1]
-        game.play_turn(card_index=0, shop_choice=0)
-
+        log: list[str] = []
+        enc.encounter_shop(p, game.item_decks[1], log, choose_index=0)
         items_after = game.item_decks[1].remaining()
         drawn = items_before - items_after
-        assert drawn == 3  # always 3 items drawn from deck
+        assert drawn == 4  # Billfold's shop_draw_count == 4
 
     def test_flee_from_monster_no_curse(self):
-        """Billfold's Fly, you dummy!: flee monster, no curse, move back 8."""
+        """Billfold's Fly, you dummy!: flee monster, no curse, move back 13."""
         game = self._make_game()
         p = game.player
 
@@ -186,15 +176,20 @@ class TestBillfold:
         if monster_tile is None:
             pytest.skip("No monster tile found")
 
-        p.position = monster_tile.index - 1
-        p.movement_hand = [1]
+        # Account for Billfold's +1 movement_card_bonus so card [1] lands exactly here
+        hero_bonus = p.hero.movement_card_bonus if p.hero else 0
+        card_val = 1
+        effective_move = card_val + hero_bonus
+        start_pos = max(1, monster_tile.index - effective_move)
+        p.position = start_pos
+        p.movement_hand = [card_val]
         curses_before = len(p.curses)
 
         result = game.play_turn(card_index=0, flee=True)
         assert result.combat_result is None  # no combat
         assert len(p.curses) == curses_before  # no curse
-        # Should have moved back 8 from monster_tile.index
-        expected_pos = max(1, monster_tile.index - 8)
+        # Should have moved back 13 from monster_tile.index
+        expected_pos = max(1, monster_tile.index - 13)
         assert p.position == expected_pos
         assert any("flees" in line.lower() for line in result.encounter_log)
 
@@ -209,8 +204,8 @@ class TestBillfold:
         result = game.play_turn(card_index=0, flee=True)
         assert result.combat_result is None
         assert len(p.curses) == curses_before
-        # Moved back 8 from tile 30 → tile 22
-        assert p.position == 22
+        # Moved back 13 from tile 30 → tile 17
+        assert p.position == 17
         # Miniboss NOT defeated
         assert p.miniboss1_defeated is False
 

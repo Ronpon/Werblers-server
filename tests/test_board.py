@@ -28,7 +28,11 @@ def test_non_day_night_non_fixed_start_hidden():
     board = generate_board(seed=1)
     for tile in board[1:]:
         if tile.tile_type not in (TileType.DAY_NIGHT, TileType.MINIBOSS, TileType.WERBLER):
-            assert tile.revealed is False, f"Tile {tile.index} should start hidden"
+            if tile.index == 1:
+                # Tile 1 is the Start tile and is always revealed
+                assert tile.revealed is True, "Tile 1 (Start) should always be revealed"
+            else:
+                assert tile.revealed is False, f"Tile {tile.index} should start hidden"
 
 
 def test_get_level():
@@ -55,9 +59,9 @@ def test_fixed_tile_counts():
     board = generate_board(seed=1)
     counts = Counter(t.tile_type for t in board[1:])  # skip dummy
     assert counts[TileType.MONSTER] == 16
-    assert counts[TileType.CHEST] == 28
+    assert counts[TileType.CHEST] == 33
     assert counts[TileType.SHOP] == 13
-    assert counts[TileType.BLANK] == 21
+    assert counts[TileType.BLANK] == 16
     assert counts[TileType.DAY_NIGHT] == 9
     assert counts[TileType.MINIBOSS] == 2
     assert counts[TileType.WERBLER] == 1

@@ -50,7 +50,8 @@ def _bark_worse_than_bite(player: Player) -> int:
     empty += max(0, player.helmet_slots - len(player.helmets))
     empty += max(0, player.chest_slots - len(player.chest_armor))
     empty += max(0, player.legs_slots - len(player.leg_armor))
-    empty += max(0, player.weapon_hands - len(player.weapons))
+    hands_used = sum(getattr(w, 'hands', 1) for w in player.weapons)
+    empty += max(0, player.weapon_hands - hands_used)
     return 3 * empty
 
 
@@ -78,7 +79,8 @@ def _nevernude(player: Player) -> int:
     empty += max(0, player.helmet_slots - len(player.helmets))
     empty += max(0, player.chest_slots - len(player.chest_armor))
     empty += max(0, player.legs_slots - len(player.leg_armor))
-    empty += max(0, player.weapon_hands - len(player.weapons))
+    hands_used = sum(getattr(w, 'hands', 1) for w in player.weapons)
+    empty += max(0, player.weapon_hands - hands_used)
     return -5 * empty
 
 
@@ -235,6 +237,10 @@ def total_minion_strength(player: Player) -> int:
 
     Minion Wrangler (effect_id='minion_wrangler'): each Minion Wrangler
     causes every OTHER minion to provide +2 additional Str.
+
+    You're the Alpha! (effect_id='youre_the_alpha'): +1 Str per minion while trait held.
+    The on-gain hook already applies +1 to existing minions; this function adds +1
+    for any minion acquired AFTER the trait was gained.
     """
     if not player.minions:
         return 0
@@ -290,6 +296,11 @@ def modify_movement_value(
         else:
             value = max(0, value)
 
+    # Hero passive movement bonus (e.g. Billfold: +1 to all cards)
+    if player.hero and player.hero.movement_card_bonus:
+        value += player.hero.movement_card_bonus
+        value = max(0, value)
+
     return value
 
 
@@ -340,27 +351,47 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> None:
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)
         player.minions.append(m)
+        on_minion_gained(player, m, log)
         log.append("  I'm a Grown-up Now!: Ted Bearson (+3 minion) joins your party!")
 
     elif eid == "misunderstood":
         m = Minion("Swamp Friend", strength_bonus=7)
         player.minions.append(m)
+        on_minion_gained(player, m, log)
         log.append("  Misunderstood: Swamp Friend (+7 minion) joins your party!")
 
     elif eid == "alpha":
-        m = Minion("Pet Velociraptor", strength_bonus=7)
+        m = Minion("Pet Velociraptor", strength_bonus=5)
         player.minions.append(m)
-        log.append("  Alpha: Pet Velociraptor (+7 minion) joins your party!")
+        on_minion_gained(player, m, log)
+        log.append("  Alpha: Pet Velociraptor (+5 minion) joins your party!")
+
+    elif eid == "youre_the_alpha":
+        # +1 Str to every currently equipped minion (future ones handled in total_minion_strength)
+        if player.minions:
+            for m in player.minions:
+                m.strength_bonus += 1
+            log.append(f"  You're the Alpha!: each of your {len(player.minions)} minion(s) gains +1 Str.")
+        else:
+            log.append("  You're the Alpha!: no minions yet — buff applies when you gain them.")
 
     elif eid == "new_lord":
-        m = Minion("Demon Spawn", strength_bonus=8)
+        m = Minion("Demon Spawn", strength_bonus=6)
         player.minions.append(m)
-        log.append("  New Lord: Demon Spawn (+8 minion) joins your party!")
+        on_minion_gained(player, m, log)
+        log.append("  New Lord: Demon Spawn (+6 minion) joins your party!")
 
     elif eid == "overlord":
         m = Minion("Minion Wrangler", strength_bonus=3, effect_id="minion_wrangler")
         player.minions.append(m)
+        on_minion_gained(player, m, log)
         log.append("  Overlord: Minion Wrangler (+3, buffs all other minions +2) joins your party!")
+
+    elif eid == "adorable":
+        m = Minion("Cute Gremlin", strength_bonus=2)
+        player.minions.append(m)
+        on_minion_gained(player, m, log)
+        log.append("  Adorable: Cute Gremlin (+2 minion) joins your party!")
 
     elif eid == "shes_melting":
         from .types import Consumable
@@ -392,6 +423,30 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> None:
 
 
 # ===================================================================
+# ON-LOSE: TRAIT / ON-GAIN: MINION
+# ===================================================================
+
+def on_trait_lost(player: Player, trait: Trait, log: list[str]) -> None:
+    """Undo effects that were applied when a trait was gained."""
+    eid = trait.effect_id
+    if eid == "youre_the_alpha":
+        if player.minions:
+            for m in player.minions:
+                m.strength_bonus = max(0, m.strength_bonus - 1)
+            log.append(
+                f"  You're the Alpha! lost: each of your {len(player.minions)} "
+                f"minion(s) loses -1 Str."
+            )
+
+
+def on_minion_gained(player: Player, minion: "Minion", log: list[str]) -> None:  # type: ignore[name-defined]
+    """Apply per-minion effects when a new minion joins the player's party."""
+    if any(t.effect_id == "youre_the_alpha" for t in player.traits):
+        minion.strength_bonus += 1
+        log.append(f"  You're the Alpha!: {minion.name} gains +1 Str.")
+
+
+# ===================================================================
 # ON-GAIN: CURSE
 # ===================================================================
 
@@ -417,6 +472,9 @@ def on_curse_gained(
             pack_names = [i.name for i in pack_footgear]
             player.pack = [i for i in player.pack if i.slot != EquipSlot.LEGS]
             log.append(f"  It Got In!: also discarded footgear from pack: {pack_names}")
+
+    elif eid == "botched_circumcision":
+        log.append("  Botched Circumcision: all movement cards −1 permanently (min 1).")
 
     elif eid == "rust_spreading":
         if player.weapons:
@@ -530,7 +588,14 @@ def on_curse_gained(
     elif eid == "together_forever":
         teddy = Minion("Lonely Teddy", strength_bonus=-2)
         player.minions.append(teddy)
+        on_minion_gained(player, teddy, log)
         log.append("  Together Forever!: Lonely Teddy (-2 Str minion) joins your party\u2026")
+
+    elif eid == "dont_get_it_wet_gremlin":
+        gremlin = Minion("Crazed Gremlin", strength_bonus=-2)
+        player.minions.append(gremlin)
+        on_minion_gained(player, gremlin, log)
+        log.append("  Don't Get it Wet: Crazed Gremlin (-2 minion) joins your party. Oh no.")
 
     # --- Pack effects ---
     elif eid in ("flooded_base", "clever_girl"):
@@ -554,31 +619,34 @@ def on_curse_gained(
 
     # (It's Wriggling is now handled as a persistent trigger in encounters.py)
 
-    # --- Its Taking Over: link curse to current helmet ---
+    # --- Its Taking Over: discard all leg and chest armor ---
     elif eid == "its_taking_over":
-        if player.helmets:
-            curse.linked_item_name = player.helmets[-1].name
-            log.append(
-                f"  It's Taking Over!: curse linked to {curse.linked_item_name}. "
-                f"Discarding that helmet will also remove this curse."
-            )
+        discarded: list[str] = []
+        if player.leg_armor:
+            discarded.extend(i.name for i in player.leg_armor)
+            player.leg_armor.clear()
+        if player.chest_armor:
+            discarded.extend(i.name for i in player.chest_armor)
+            player.chest_armor.clear()
+        if discarded:
+            log.append(f"  It's Taking Over!: discarded legs and chest armour: {discarded}")
         else:
-            log.append("  It's Taking Over!: no helmet equipped — curse stays permanently.")
+            log.append("  It's Taking Over!: no leg or chest armour equipped \u2014 nothing discarded.")
 
-    # --- Get Rekt: player chooses to block helmet or chest slot ---
+    # --- Get Rekt: discard highest-Str equipped item immediately ---
     elif eid == "get_rekt":
-        if decide_fn:
-            block_helmet = decide_fn(
-                "Get Rekt!: Block your helmet slot? (No = block chest slot instead)", log
-            )
+        all_equipped = player.helmets + player.chest_armor + player.leg_armor + player.weapons
+        eligible = [
+            i for i in all_equipped
+            if not i.locked_by_curse_id
+            or not any(c.effect_id == i.locked_by_curse_id for c in player.curses)
+        ]
+        if eligible:
+            best = max(eligible, key=lambda i: i.strength_bonus)
+            player.unequip(best)
+            log.append(f"  Get Rekt!: {best.name} Discarded.")
         else:
-            block_helmet = True  # default: block helmet slot
-        if block_helmet:
-            curse.helmet_slot_bonus = -1
-            log.append("  Get Rekt!: helmet slot permanently blocked.")
-        else:
-            curse.chest_slot_bonus = -1
-            log.append("  Get Rekt!: chest slot permanently blocked.")
+            log.append("  Get Rekt!: no eligible equipped items to discard.")
 
     # --- Can't Stop the Music: force locked Dancing Shoes to feet ---
     elif eid == "cant_stop_music":

@@ -28,7 +28,7 @@ MINIONS: dict[str, dict] = {
     "demon_spawn": {
         "name": "Demon Spawn",
         "type": "Minion",
-        "strength": "+7",
+        "strength": "+6",
         "portrait": "Demon Spawn.png",
         "output": "Demon Spawn Card.png",
         "blurb": "Aww, so\u2026 cute\u2026?",
@@ -76,7 +76,7 @@ MINIONS: dict[str, dict] = {
     "pet_velociraptor": {
         "name": "Pet Velociraptor",
         "type": "Minion",
-        "strength": "+8",
+        "strength": "+5",
         "portrait": "Pet Velociraptor.png",
         "output": "Pet Velociraptor Card.png",
         "blurb": "Surprisingly clever.",

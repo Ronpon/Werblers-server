@@ -23,7 +23,7 @@ The engine (`content.py`, `effects.py`) must match these specifications.
 - **Flavour:** Watch your step!
 - **Str:** 2
 - **Trait:** Rake It In! When drawing an Equip card, you may discard one currently-equipped card to draw a second new one (level must match current position).
-- **Curse:** Eughghghghgh. Snap! If you have more curses than traits, treat all 1 movement cards as a 0. The tile still activates.
+- **Curse:** Eughghghghgh. Snap! If you have more curses than traits, treat all 1 movement cards as a 0. If you play a 0, reactivate the current tile.
 
 ### Cursed Teddy Bear
 - **Flavour:** So… darn… cute…

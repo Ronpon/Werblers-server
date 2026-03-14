@@ -43,10 +43,12 @@ class TestHeadArmourPools:
         expected = {
             "Colander", "Propeller Hat", "Sweet bandana",
             "Miner\u2019s Helmet", "Baseball Cap", "Lupine Helm",
-            "Paper Bag", "Football Helmet", "Squire\u2019s Helm",
+            "Paper Bag", "Squire\u2019s Helm",
             "Swiss Guard Helmet",
         }
         assert expected <= self._helmets(C.ITEM_POOL_L1)
+        # Football Helmet is Tier 2
+        assert "Football Helmet" not in self._helmets(C.ITEM_POOL_L1), "Football Helmet should not be in L1 pool"
         # Crown of Thorns and Face Mask have moved to Tier 3
         for name in ("Crown of Thorns", "Face Mask"):
             assert name not in self._helmets(C.ITEM_POOL_L1), f"{name} should not be in L1 pool"

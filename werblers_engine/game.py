@@ -395,6 +395,7 @@ class Game:
                 removed = removable[0]
                 player.curses.remove(removed)
                 player.traits.remove(eight_lives)
+                _fx.on_trait_lost(player, eight_lives, log)
                 _fx.refresh_tokens(player)
                 log.append(f"  Eight Lives: discarded trait, removed curse '{removed.name}'!")
             else:
@@ -486,6 +487,7 @@ class Game:
             "Touchdown!: Discard this trait to teleport to the Werbler tile (tile 90)?", log
         ):
             player.traits.remove(td_trait)
+            _fx.on_trait_lost(player, td_trait, log)
             _fx.refresh_tokens(player)
             player.position = 90
             log.append("  Touchdown!: teleported to tile 90 (Werbler)!")
@@ -969,6 +971,7 @@ class Game:
                 removed = removable[0]
                 player.curses.remove(removed)
                 player.traits.remove(eight_lives)
+                _fx.on_trait_lost(player, eight_lives, log)
                 _fx.refresh_tokens(player)
                 log.append(
                     f"  Eight Lives: discarded trait, removed curse '{removed.name}'!"
@@ -1039,6 +1042,7 @@ class Game:
             td = next((t for t in player.traits if t.effect_id == "touchdown"), None)
             if td:
                 player.traits.remove(td)
+                _fx.on_trait_lost(player, td, log)
                 _fx.refresh_tokens(player)
                 old_pos = player.position
                 player.position = 90
@@ -1213,7 +1217,7 @@ class Game:
 
         # 15. Shop — pause for interactive offer
         if actual_type == TileType.SHOP:
-            draw_count = 3
+            draw_count = player.hero.shop_draw_count if player.hero else 3
             items = self.item_decks[level].draw_many(draw_count)
             if not items:
                 log.append("Shop: item deck is empty \u2014 nothing to buy.")
@@ -1275,9 +1279,9 @@ class Game:
                     "card_played": card_value, "tile_type": tile.tile_type.name,
                     "combat_result": None, "game_status": self.status.name, "winner": self.winner,
                 }
-            has_reroll = any(
-                t.effect_id in ("ill_come_in_again", "i_see_everything")
-                for t in player.traits
+            reroll_count = sum(
+                1 for t in player.traits
+                if t.effect_id in ("ill_come_in_again", "i_see_everything")
             )
             self._pending_combat = {
                 "monster": monster,
@@ -1289,7 +1293,8 @@ class Game:
                 "new_pos": new_pos,
                 "card_value": card_value,
                 "tile_type": tile.tile_type.name,
-                "ill_come_in_again_available": has_reroll,
+                "ill_come_in_again_count": reroll_count,
+                "ill_come_in_again_available": reroll_count > 0,
             }
             combat_info = {
                 "monster_name": monster.name,
@@ -1301,7 +1306,7 @@ class Game:
                 "category": "monster",
                 "level": level,
                 "result": None,
-                "ill_come_in_again_available": has_reroll,
+                "ill_come_in_again_available": reroll_count > 0,
             }
             self._last_combat_info = combat_info
             return {
@@ -1372,12 +1377,25 @@ class Game:
             self._pending_combat["ability_player_mod"] = _ab_player_mod
             self._pending_combat["ability_monster_mod"] = _ab_monster_mod
             self._pending_combat["ability_breakdown"] = _ab_log
+
+            # Ogre Cutpurse: discard pack items IMMEDIATELY so STR display is accurate
+            ogre_player_mod = 0
+            ogre_monster_mod = 0
+            if miniboss.effect_id == "ogre_cutpurse":
+                _ogre_log: list[str] = []
+                ogre_monster_mod, ogre_player_mod = enc._ogre_pre_combat(
+                    player, miniboss, _ogre_log)
+                log.extend(_ogre_log)
+                _ab_log.extend(_ogre_log)  # include in breakdown for tooltip
+            self._pending_combat["ogre_player_mod"] = ogre_player_mod
+            self._pending_combat["ogre_monster_mod"] = ogre_monster_mod
+
             combat_info = {
                 "monster_name": miniboss.name,
-                "monster_strength": miniboss.strength + _ab_monster_mod,
-                "player_strength": player.combat_strength() + _ab_player_mod,
-                "ability_player_mod": _ab_player_mod,
-                "ability_monster_mod": _ab_monster_mod,
+                "monster_strength": miniboss.strength + _ab_monster_mod + ogre_monster_mod,
+                "player_strength": player.combat_strength() + _ab_player_mod + ogre_player_mod,
+                "ability_player_mod": _ab_player_mod + ogre_player_mod,
+                "ability_monster_mod": _ab_monster_mod + ogre_monster_mod,
                 "ability_breakdown": _ab_log,
                 "description": miniboss.description,
                 "player_id": player.player_id,
@@ -1457,9 +1475,13 @@ class Game:
         }
 
     def use_ill_come_in_again(self) -> dict:
-        """Use I'll Come In Again / I See Everything: return current monster and draw a new one."""
+        """Use I'll Come In Again / I See Everything: return current monster and draw a new one.
+
+        Supports stacking — players with both traits get 2 rerolls per encounter.
+        """
         pc = self._pending_combat
-        if pc is None or not pc.get("ill_come_in_again_available"):
+        count = pc.get("ill_come_in_again_count", 1 if pc and pc.get("ill_come_in_again_available") else 0) if pc else 0
+        if pc is None or count <= 0:
             return {"error": "Trait not available for this encounter"}
         monster = pc["monster"]
         deck = pc["effective_deck"]
@@ -1470,10 +1492,14 @@ class Game:
             deck.put_bottom(monster)
             return {"error": "Monster deck is empty — cannot draw a replacement"}
         pc["monster"] = new_monster
-        pc["ill_come_in_again_available"] = False  # one use per encounter
+        pc["ill_come_in_again_count"] = count - 1
+        pc["ill_come_in_again_available"] = (count - 1) > 0
         player = self.current_player
         log = pc.get("log", [])
-        log.append(f"  I'll Come In Again!: sent {monster.name} back, drew {new_monster.name}.")
+        # Use the actual trait name for the log entry
+        reroll_traits = [t for t in player.traits if t.effect_id in ("ill_come_in_again", "i_see_everything")]
+        trait_name = reroll_traits[0].name if reroll_traits else "I'll Come In Again!"
+        log.append(f"  {trait_name}: sent {monster.name} back, drew {new_monster.name}.")
         combat_info = {
             "monster_name": new_monster.name,
             "monster_strength": new_monster.strength,
@@ -1484,7 +1510,7 @@ class Game:
             "category": "monster",
             "level": pc.get("level", 1),
             "result": None,
-            "ill_come_in_again_available": False,
+            "ill_come_in_again_available": pc["ill_come_in_again_available"],
         }
         self._last_combat_info = combat_info
         return {"phase": "combat", "combat_info": combat_info}
@@ -1527,12 +1553,19 @@ class Game:
             reward_deck_level = pc["reward_deck_level"]
             boss_tile = pc["boss_tile"]
             other_players = pc["other_players"]
-            player_str_at_fight = player.combat_strength() + pc.get("ability_player_mod", 0)
+            ogre_player_mod = pc.get("ogre_player_mod", 0)
+            ogre_monster_mod = pc.get("ogre_monster_mod", 0)
+            player_str_at_fight = player.combat_strength() + pc.get("ability_player_mod", 0) + ogre_player_mod
+            # Build pre_run_ogre if pack was already discarded at fight-start
+            pre_run_ogre: Optional[tuple[int, int]] = None
+            if pc.get("ogre_player_mod") is not None or pc.get("ogre_monster_mod") is not None:
+                pre_run_ogre = (ogre_monster_mod, ogre_player_mod)
             combat_result = enc.encounter_miniboss(
                 player, miniboss, self.item_decks[reward_deck_level], log,
                 is_night=self.is_night, flee=False,
                 decide_fn=_no_consumable_decide, select_fn=self._select,
                 other_players=other_players,
+                pre_run_ogre=pre_run_ogre,
             )
             if combat_result == CombatResult.WIN:
                 if boss_tile == 30:
@@ -1543,10 +1576,10 @@ class Game:
                     self.active_miniboss_t2 = None
             self._last_combat_info = {
                 "monster_name": miniboss.name,
-                "monster_strength": miniboss.strength + pc.get("ability_monster_mod", 0),
+                "monster_strength": miniboss.strength + pc.get("ability_monster_mod", 0) + ogre_monster_mod,
                 "player_strength": player_str_at_fight,
-                "ability_player_mod": pc.get("ability_player_mod", 0),
-                "ability_monster_mod": pc.get("ability_monster_mod", 0),
+                "ability_player_mod": pc.get("ability_player_mod", 0) + ogre_player_mod,
+                "ability_monster_mod": pc.get("ability_monster_mod", 0) + ogre_monster_mod,
                 "ability_breakdown": pc.get("ability_breakdown", []),
                 "player_id": player.player_id,
                 "player_name": player.name,
@@ -1629,6 +1662,56 @@ class Game:
             "card_played": card_value, "tile_type": tile_type_name,
             "combat_result": combat_result.name if combat_result else None,
             "combat_info": self._last_combat_info,
+            "game_status": self.status.name, "winner": self.winner,
+        }
+
+    def flee_monster(self) -> dict:
+        """Billfold: Fly, you dummy! — flee from the pending monster or miniboss combat.
+
+        Validates the pending combat type and hero flee capability, then moves
+        the player back (flee_move_back spaces), resets pre-fight bonuses,
+        and advances the turn.
+        """
+        if self._pending_combat is None:
+            return {"error": "No pending combat", "phase": "error"}
+
+        player = self.current_player
+        pc = self._pending_combat
+        combat_type = pc.get("type", "monster")
+
+        if combat_type == "werbler":
+            return {"error": "Cannot flee from the Werbler!", "phase": "error"}
+        if combat_type == "miniboss":
+            if not player.hero or not player.hero.can_flee_miniboss:
+                return {"error": "This hero cannot flee a Miniboss.", "phase": "error"}
+        else:  # monster
+            if not player.hero or not player.hero.can_flee_monsters:
+                return {"error": "This hero cannot flee.", "phase": "error"}
+
+        self._pending_combat = None
+        log = pc["log"]
+        old_pos = pc["old_pos"]
+        new_pos = pc["new_pos"]
+        card_value = pc["card_value"]
+        tile_type_name = pc["tile_type"]
+
+        monster = pc.get("monster")
+        if monster:
+            log.append(
+                f"  Fly, you dummy! {player.name} flees from {monster.name}! "
+                f"No curse received."
+            )
+        self._apply_flee_move_back(player, log)
+        self._prefight_str_bonus = 0
+        self._prefight_monster_str_bonus = 0
+
+        self._finish_post_encounter(player, log)
+        self._advance_turn()
+        return {
+            "phase": "done", "log": log,
+            "moved_from": old_pos, "moved_to": player.position,
+            "card_played": card_value, "tile_type": tile_type_name,
+            "combat_result": None,
             "game_status": self.status.name, "winner": self.winner,
         }
 
@@ -1734,10 +1817,14 @@ class Game:
         offer_type = pending["type"]
         log: list[str] = []
 
+        took_item = False
+        shop_remaining: list[Item] = []
+
         if offer_type == "chest":
             item = pending["items"][0]
             if choices.get("take", False):
                 self._apply_item_to_player(player, item, choices, log)
+                took_item = True
             else:
                 log.append(f"  {item.name} left behind.")
 
@@ -1749,10 +1836,43 @@ class Game:
                 cidx = min(int(choices.get("chosen_index", 0)), len(items) - 1)
                 chosen = items[cidx]
                 log.append(f"Shop: took {chosen.name}.")
-                remaining = [i.name for i in items if i is not chosen]
-                if remaining:
-                    log.append(f"  Remaining items discarded: {remaining}")
+                shop_remaining = [i for i in items if i is not chosen]
+                if shop_remaining:
+                    log.append(f"  Remaining items put back or discarded: {[i.name for i in shop_remaining]}")
                 self._apply_item_to_player(player, chosen, choices, log)
+                took_item = True
+
+        # Check for Rake It In — pause if player took an item and has unlocked equips
+        if took_item and any(t.effect_id == "rake_it_in" for t in player.traits):
+            all_equips = player.helmets + player.chest_armor + player.leg_armor + player.weapons
+            unlocked = [
+                e for e in all_equips
+                if not e.locked_by_curse_id
+                or not any(c.effect_id == e.locked_by_curse_id for c in player.curses)
+            ]
+            if unlocked:
+                self._pending_offer = {
+                    "type": "rake_it_in",
+                    "sub_type": offer_type,
+                    "level": pending["level"],
+                    "shop_remaining": shop_remaining,
+                    "moved_from": pending["moved_from"],
+                    "moved_to": pending["moved_to"],
+                    "card_played": pending["card_played"],
+                    "tile_type": pending["tile_type"],
+                    "log": log,
+                }
+                return {
+                    "phase": "rake_it_in",
+                    "log": log,
+                    "sub_type": offer_type,
+                    "equips": [_item_to_dict(e) for e in unlocked],
+                    "shop_remaining": [_item_to_dict(i) for i in shop_remaining],
+                    "moved_from": pending["moved_from"],
+                    "moved_to": pending["moved_to"],
+                    "card_played": pending["card_played"],
+                    "tile_type": pending["tile_type"],
+                }
 
         self._finish_post_encounter(player, log)
         if self.status == GameStatus.WON:
@@ -1762,6 +1882,88 @@ class Game:
             "phase": "done", "log": log,
             "moved_from": pending["moved_from"], "moved_to": pending["moved_to"],
             "card_played": pending["card_played"], "tile_type": pending["tile_type"],
+            "combat_result": None, "game_status": self.status.name, "winner": self.winner,
+        }
+
+    def resolve_rake_it_in(
+        self,
+        use_it: bool,
+        discard_slot: str = "",
+        discard_idx: int = 0,
+        second_item_choice: int = -1,
+        placement_choices: Optional[dict] = None,
+    ) -> dict:
+        """Resolve the Rake It In decision after a chest or shop offer.
+
+        Call after ``resolve_offer`` returned ``phase == "rake_it_in"``.
+
+        use_it=True → player discards an equipped item and draws/picks a bonus item.
+        discard_slot  : "equip_helmet"|"equip_chest"|"equip_leg"|"equip_weapon"
+        discard_idx   : index within that slot list
+        second_item_choice : for shop sub-type, which remaining item to take (0-based).
+                             Ignored for chest (random draw from deck).
+        placement_choices  : same placement kwargs as resolve_offer for the bonus item.
+        """
+        pending = self._pending_offer
+        self._pending_offer = None
+        if pending is None or pending.get("type") != "rake_it_in":
+            return {"phase": "done", "log": ["No pending Rake It In offer."],
+                    "game_status": self.status.name, "winner": self.winner}
+
+        player = self.current_player
+        log: list[str] = pending.get("log", [])
+        sub_type = pending.get("sub_type", "chest")
+        level: int = pending.get("level", 1)
+        bonus_item_info: Optional[dict] = None
+
+        if use_it:
+            slot_map = {
+                "equip_helmet": player.helmets,
+                "equip_chest":  player.chest_armor,
+                "equip_leg":    player.leg_armor,
+                "equip_weapon": player.weapons,
+            }
+            slot_list = slot_map.get(discard_slot, [])
+            if slot_list and 0 <= discard_idx < len(slot_list):
+                discarded = slot_list[discard_idx]
+                player.unequip(discarded)
+                log.append(f"  Rake It In!: discarded {discarded.name}.")
+            else:
+                log.append("  Rake It In!: invalid discard choice \u2014 skipping.")
+                use_it = False
+
+        if use_it:
+            if sub_type == "chest":
+                # Draw a random bonus item from the tier deck
+                bonus = self.item_decks[level].draw()
+                if bonus is not None:
+                    self._apply_item_to_player(player, bonus, placement_choices or {}, log)
+                    log.append(f"  Rake It In!: bonus item \u2014 {bonus.name}!")
+                    bonus_item_info = _item_to_dict(bonus)
+                else:
+                    log.append("  Rake It In!: item deck empty \u2014 no bonus draw.")
+            elif sub_type == "shop":
+                remaining: list[Item] = pending.get("shop_remaining", [])
+                if remaining and 0 <= second_item_choice < len(remaining):
+                    bonus = remaining[second_item_choice]
+                    self._apply_item_to_player(player, bonus, placement_choices or {}, log)
+                    log.append(f"  Rake It In!: picked bonus shop item \u2014 {bonus.name}!")
+                    bonus_item_info = _item_to_dict(bonus)
+                else:
+                    log.append("  Rake It In!: no valid second item chosen.")
+        else:
+            log.append("  Rake It In!: skipped.")
+
+        self._finish_post_encounter(player, log)
+        if self.status == GameStatus.WON:
+            log.append(f"\U0001f389 Game Over \u2014 {player.name} Wins!")
+        self._advance_turn()
+        return {
+            "phase": "done",
+            "log": log,
+            "bonus_item": bonus_item_info,
+            "moved_from": pending.get("moved_from"), "moved_to": pending.get("moved_to"),
+            "card_played": pending.get("card_played"), "tile_type": pending.get("tile_type"),
             "combat_result": None, "game_status": self.status.name, "winner": self.winner,
         }
 

@@ -257,8 +257,8 @@ body {
 
 .player-token {
   position: absolute;
-  width: 38px;
-  height: 38px;
+  width: 76px;
+  height: 76px;
   object-fit: contain;
   filter: drop-shadow(0 2px 5px rgba(0,0,0,0.95));
   transition: transform 0.25s ease;
@@ -266,8 +266,8 @@ body {
 
 .current-player-token {
   filter:
-    drop-shadow(0 0 8px #ffd700)
-    drop-shadow(0 0 16px rgba(255,215,0,0.7))
+    drop-shadow(0 0 3px #ffd700)
+    drop-shadow(0 0 6px rgba(255,215,0,0.5))
     drop-shadow(0 2px 5px rgba(0,0,0,0.95));
   animation: token-glow-pulse 1.5s ease-in-out infinite;
 }
@@ -275,14 +275,14 @@ body {
 @keyframes token-glow-pulse {
   0%, 100% {
     filter:
-      drop-shadow(0 0 6px #ffd700)
-      drop-shadow(0 0 12px rgba(255,215,0,0.6))
+      drop-shadow(0 0 2px #ffd700)
+      drop-shadow(0 0 5px rgba(255,215,0,0.45))
       drop-shadow(0 2px 5px rgba(0,0,0,0.95));
   }
   50% {
     filter:
-      drop-shadow(0 0 12px #ffd700)
-      drop-shadow(0 0 24px rgba(255,215,0,0.85))
+      drop-shadow(0 0 4px #ffd700)
+      drop-shadow(0 0 8px rgba(255,215,0,0.6))
       drop-shadow(0 2px 5px rgba(0,0,0,0.95));
   }
 }
@@ -690,7 +690,7 @@ body {
   border: 2px solid var(--gold);
   border-radius: 14px;
   padding: 32px 36px;
-  max-width: 680px;
+  max-width: 920px;
   width: 100%;
   text-align: center;
 }
@@ -902,11 +902,11 @@ body {
 /* ================================================================ STR TOKEN BADGES */
 .str-token {
   display: inline-block;
-  width: 64px;
-  height: 64px;
+  width: 28px;
+  height: 28px;
   vertical-align: middle;
   object-fit: contain;
-  margin-left: 2px;
+  margin-left: 1px;
 }
 .token-overflow {
   font-size: 11px;
@@ -1027,6 +1027,25 @@ body {
   color: var(--gold);
   letter-spacing: 2px;
 }
+.ps-sheet-str {
+  font-family: 'Cinzel', serif;
+  font-size: 14px;
+  color: var(--text);
+  letter-spacing: 1px;
+  margin-top: 2px;
+  margin-bottom: 4px;
+}
+
+.ps-center-str {
+  font-family: 'Cinzel', serif;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--gold-light);
+  letter-spacing: 2px;
+  text-align: center;
+  margin-bottom: 8px;
+  cursor: help;
+}
 
 #ps-layout {
   display: flex;
@@ -1116,6 +1135,8 @@ body {
   height: 100%;
   object-fit: cover;
   border-radius: 4px;
+  image-rendering: auto;
+  image-rendering: smooth;
 }
 
 .ps-pile-label {
@@ -1136,6 +1157,8 @@ body {
   box-shadow: 0 0 24px rgba(201,168,76,0.25), 0 4px 20px rgba(0,0,0,0.6);
   cursor: zoom-in;
   transition: transform 0.15s;
+  image-rendering: auto;
+  image-rendering: smooth;
 }
 .ps-hero-card-img:hover { transform: scale(1.03); }
 
@@ -1260,6 +1283,78 @@ body {
   text-transform: uppercase;
   margin-top: 4px;
 }
+.mv-card-img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  border-radius: 6px;
+  display: block;
+  image-rendering: auto;
+}
+
+.mv-curse-badge {
+  background: #b22;
+  color: #fff;
+  font-weight: bold;
+  font-size: 13px;
+  padding: 3px 8px;
+  border-radius: 10px;
+  align-self: center;
+  margin-right: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ================================================================ FLED SCREEN */
+.fled-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  padding: 48px 32px;
+  text-align: center;
+}
+.fled-title {
+  font-family: 'Cinzel', serif;
+  font-size: 42px;
+  font-weight: 700;
+  color: var(--gold);
+  text-shadow: 0 0 24px rgba(201,168,76,0.5);
+  margin-bottom: 16px;
+}
+.fled-msg {
+  font-size: 18px;
+  color: var(--text-dim);
+}
+.flee-move-notice {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flee-move-box {
+  background: var(--surface2);
+  border: 2px solid var(--gold);
+  border-radius: 12px;
+  padding: 32px 48px;
+  text-align: center;
+  min-width: 280px;
+}
+.flee-move-title {
+  font-family: 'Cinzel', serif;
+  font-size: 26px;
+  color: var(--gold);
+  margin-bottom: 8px;
+}
+.flee-move-sub {
+  font-size: 15px;
+  color: var(--text-dim);
+  margin-bottom: 24px;
+}
 
 /* ================================================================ MINION POOL */
 .ps-minion-pool {
@@ -1347,6 +1442,82 @@ body {
   justify-content: center;
 }
 
+/* ================================================================ RAKE IT IN MODAL */
+#rake-it-in-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 3050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#rake-it-in-modal .modal-box {
+  background: var(--surface);
+  border: 2px solid var(--gold);
+  border-radius: 12px;
+  padding: 28px 36px;
+  text-align: center;
+}
+#rake-it-in-modal .modal-title {
+  font-family: 'Cinzel', serif;
+  font-size: 20px;
+  color: var(--gold);
+  margin-bottom: 10px;
+}
+#rake-it-in-modal .modal-desc {
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-bottom: 14px;
+}
+#rake-it-in-modal .modal-section-label {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.rake-equip-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  padding: 6px;
+  transition: border-color 0.15s;
+}
+.rake-equip-btn:hover { border-color: var(--gold); }
+.rake-equip-btn.rake-selected { border-color: var(--gold); background: rgba(255,215,0,0.12); }
+.rake-item-thumb {
+  width: 80px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+.rake-item-name {
+  font-size: 11px;
+  color: var(--text);
+  margin-top: 4px;
+  text-align: center;
+  max-width: 90px;
+  word-break: break-word;
+}
+.rake-section-label {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 12px 0 6px;
+}
+.rake-items-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+#rake-it-in-modal .modal-btns {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 20px;
+}
+
 /* ================================================================ OCCUPIED SLOT MODAL */
 #occupied-slot-modal {
   position: fixed;
@@ -1362,8 +1533,41 @@ body {
   border: 2px solid var(--gold);
   border-radius: 12px;
   padding: 28px 36px;
-  max-width: 380px;
+  max-width: 700px;
+  width: 100%;
   text-align: center;
+}
+.occupied-slot-cards {
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 32px;
+  margin: 16px 0 24px;
+}
+.occupied-slot-card-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.occupied-slot-card-label {
+  font-size: 11px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-family: 'Cinzel', serif;
+}
+.occupied-slot-card-img {
+  width: 200px;
+  height: auto;
+  border-radius: 8px;
+  border: 2px solid var(--border);
+  cursor: pointer;
+}
+.occupied-slot-arrow {
+  font-size: 28px;
+  color: var(--gold);
+  padding-bottom: 16px;
 }
 #occupied-slot-modal .modal-title {
   font-family: 'Cinzel', serif;
@@ -1450,7 +1654,8 @@ body {
 .ps-equip-cell {
   width: 100px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
 }
 
 /* ---- Card slots (equip + pack) ---- */
@@ -1527,6 +1732,17 @@ body {
   text-transform: uppercase;
   text-align: center;
   line-height: 1.2;
+}
+
+.ps-slot-title-above {
+  font-family: 'Cinzel', serif;
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  text-align: center;
+  line-height: 1.2;
+  margin-bottom: 3px;
 }
 
 .ps-slot-filled .ps-slot-label {
@@ -1650,6 +1866,8 @@ body {
   object-fit: cover;
   border-radius: 5px;
   display: block;
+  image-rendering: auto;
+  image-rendering: smooth;
 }
 .ps-slot.ps-slot-card {
   padding: 0;
@@ -2032,6 +2250,148 @@ body {
 .btn-use-consumable:hover {
   background: rgba(120,200,80,0.18);
 }
+.btn-use-consumable-ow {
+  background: transparent;
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  margin-left: 6px;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+.btn-use-consumable-ow:hover {
+  background: rgba(200,160,58,0.18);
+}
+
+/* ============================================================ CONSUMABLE CLICKABLE (overworld pack) */
+.consumable-clickable {
+  cursor: pointer;
+  border-radius: 5px;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.consumable-clickable:hover {
+  background: rgba(201,168,76,0.12);
+  box-shadow: 0 0 0 1px var(--gold);
+}
+
+/* ============================================================ CONSUMABLE MODAL */
+.consumable-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.80);
+  z-index: 3200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.consumable-modal-box {
+  background: var(--surface);
+  border: 2px solid var(--gold);
+  border-radius: 14px;
+  padding: 30px 36px;
+  max-width: 520px;
+  width: 100%;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.consumable-modal-title {
+  font-family: 'Cinzel', serif;
+  font-size: 20px;
+  color: var(--gold-light);
+  letter-spacing: 2px;
+}
+.consumable-modal-card-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.consumable-modal-card-img {
+  width: 160px;
+  height: auto;
+  border: 2px solid var(--gold);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+}
+.consumable-modal-msg {
+  font-size: 14px;
+  color: var(--text-dim);
+  font-style: italic;
+  line-height: 1.5;
+  max-width: 380px;
+}
+.consumable-modal-actions {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ============================================================ CONSUMABLE RESULT */
+.consumable-result-name {
+  font-family: 'Cinzel', serif;
+  font-size: 16px;
+  letter-spacing: 1px;
+}
+.consumable-result-name.result-trait { color: var(--trait); }
+.consumable-result-name.result-curse { color: var(--curse); }
+.consumable-result-desc {
+  font-size: 13px;
+  color: var(--text-dim);
+  font-style: italic;
+  line-height: 1.5;
+  max-width: 360px;
+}
+.consumable-result-from {
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+}
+
+/* ============================================================ BYSTANDER PHASE SCREEN */
+.bystander-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 18px;
+  width: 100%;
+  max-width: 480px;
+}
+.bystander-token {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 2px solid var(--gold);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.bystander-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.bystander-name {
+  font-family: 'Cinzel', serif;
+  font-size: 16px;
+  color: var(--gold);
+  letter-spacing: 1px;
+}
+.bystander-subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+}
 
 /* ============================================================ BOSS DESCRIPTION */
 .battle-boss-desc {
@@ -2186,6 +2546,34 @@ body {
   padding: 10px 32px;
   letter-spacing: 1px;
 }
+.billfold-flee-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0,0,0,0.55);
+  border: 1.5px solid #c8a03a;
+  border-radius: 10px;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.billfold-flee-box:hover { background: rgba(200,160,58,0.18); }
+.flee-token-img {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.8));
+}
+.btn-flee {
+  background: none;
+  border: none;
+  color: #f0c060;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  padding: 0;
+}
+.btn-flee:hover { text-decoration: underline; }
 
 /* ================================================================ OPTIONS BUTTON */
 #options-btn {

@@ -263,15 +263,6 @@ class Player:
         if item in slot_list:
             slot_list.remove(item)
             _fx.refresh_tokens(self)
-            # If a helmet was removed, drop any its_taking_over curse linked to it
-            if item.slot == EquipSlot.HELMET:
-                self.curses = [
-                    c for c in self.curses
-                    if not (
-                        c.effect_id == "its_taking_over"
-                        and c.linked_item_name == item.name
-                    )
-                ]
             return True
         return False
 

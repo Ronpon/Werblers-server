@@ -48,7 +48,7 @@ HEROES: dict[str, dict] = {
                 "name": "Fly, you dummy!",
                 "text": (
                     "You may flee from any Monster or Miniboss battle, "
-                    "receiving no curse. If you do, you must move back 8 "
+                    "receiving no curse. If you do, you must move back 13 "
                     "spaces (minimum tile 1). Cannot flee The Werbler."
                 ),
             },

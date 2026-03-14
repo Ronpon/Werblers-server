@@ -44,8 +44,8 @@ MINIBOSS_POOL_T2: list[Monster] = [
             description="May not use consumables for this fight. "
                         "All empty equip slots provide +2 Str each."),
     Monster("Ogre Cutpurse", strength=25, level=2, effect_id="ogre_cutpurse",
-            description="Discard all pack items at combat start; if equipped items were in pack, "
-                        "add their Str to monster. If pack is empty when fight begins → +5 Str."),
+            description="Discard all pack items at combat start; if any items were in pack, "
+                        "add their Str to monster. If pack was ALREADY empty before pillage \u2192 +5 Str to player."),
 ]
 
 WERBLER_POOL: list[Monster] = [
@@ -114,7 +114,7 @@ ITEM_POOL_L1: list[Item] = [
     Item("Nazi Helmet", EquipSlot.HELMET, strength_bonus=3),  # Is it worth it? Really?
     Item("Lupine Helm", EquipSlot.HELMET, strength_bonus=4),  # It’s a wolf skull. From a dead wolf. Wicked.
     Item("Paper Bag", EquipSlot.HELMET, strength_bonus=1),  # Ability: Enemies cannot see your gender or class.
-    Item("Football Helmet", EquipSlot.HELMET, strength_bonus=5),  # Won’t prevent concussion.
+
     Item("Squire’s Helm", EquipSlot.HELMET, strength_bonus=4),  # It’s like the Knight’s Helm… but slightly worse.
     Item("Swiss Guard Helmet", EquipSlot.HELMET, strength_bonus=5),  # Feathers? How fancy!
     # Tier 1 consumables (2 copies each)
@@ -155,6 +155,7 @@ ITEM_POOL_L2: list[Item] = [
     Item("Transmogrifier", EquipSlot.WEAPON, strength_bonus=0, effect_id="transmogrifier"),
     Item("Freeze Ray", EquipSlot.WEAPON, strength_bonus=2, hands=2, effect_id="freeze_ray", is_ranged=True),
     Item("War Helm", EquipSlot.HELMET, strength_bonus=3),
+    Item("Football Helmet", EquipSlot.HELMET, strength_bonus=5),  # Won't prevent concussion.
     # Tier 2 consumables (2 copies each)
     Item("Monster Capture Device Mark II",  EquipSlot.CONSUMABLE, is_consumable=True),
     Item("Monster Capture Device Mark II",  EquipSlot.CONSUMABLE, is_consumable=True),
@@ -193,7 +194,7 @@ ITEM_POOL_L3: list[Item] = [
     Item("Flaming Claymore", EquipSlot.WEAPON, strength_bonus=12, hands=2),
     Item("Motha-flippin' Machine Gun", EquipSlot.WEAPON, strength_bonus=12, hands=2, is_ranged=True, is_gun=True),
     Item("Alien Rifle", EquipSlot.WEAPON, strength_bonus=17, hands=2, is_ranged=True, is_gun=True),
-    Item("Inconveniently Large Sword", EquipSlot.WEAPON, strength_bonus=18, hands=3),
+    Item("Inconveniently Large Sword", EquipSlot.WEAPON, strength_bonus=25, hands=4),
     Item("Bugger Blaster", EquipSlot.WEAPON, strength_bonus=10, is_ranged=True, is_gun=True),
     Item("Crown of the Colossus", EquipSlot.HELMET, strength_bonus=7),  # It's a bit bulky
     Item("Astronaut Helmet", EquipSlot.HELMET, strength_bonus=6),  # You're not the man they think you are at home
@@ -264,26 +265,27 @@ TRAIT_DESCRIPTIONS: dict[str, str] = {
     "Battle Hardened": "+5 Str permanently.",
     "Blood Pact": "+3 Str permanently.",
     "Gremlin's Cunning": "+2 Str permanently.",
+    "Adorable": "Gain a Cute Gremlin Minion Card (+2 Str).",
     # Monster traits — conditional
-    "Calloused": "+1 Str for each curse you currently have.",
-    "BDE": "+1 Str per empty equipment slot you have.",
+    "Calloused": "+3 Str when not wearing any headgear.",
+    "BDE": "+5 Str. If you have no foot armour.",
     "Tough Skin": "+1 Str per item in your pack.",
-    "Bark Worse Than its Bite": "+2 Str for every curse you have.",
-    "Strengthened by Taint": "+5 Str for each Tier 3 curse you have.",
+    "Bark Worse Than its Bite": "+3 Str for each empty equipment slot.",
+    "Strengthened by Taint": "+2 Str for each curse you have.",
     # Monster traits — on-gain items / special
-    "Ball and Chain": "Gain the Ball and Chain item (Weapon, +0 Str, locks to your hand).",
+    "Ball and Chain": "Gain the Ball and Chain item (Weapon, +7 Str, locks to your hand).",
     "You Got a Birdie!": "Take a Power Driver Equip Card (2H, +10 Str).",
-    "Kapwing!": "Guns get +4 Str permanently.",
-    "I'm a Grown-up Now!": "Gain a Ted Bearson Minion Card (contributes its Str to your total).",
-    "Alpha": "Each of your minions gains +1 Str permanently.",
-    "She's Melting!": "Immune to curses from monsters with 'Witch' in their name.",
+    "Kapwing!": "Gain a Bulletproof Vest (+8 chest armour).",
+    "I'm a Grown-up Now!": "Gain a Ted Bearson Minion Card (+3 Str).",
+    "Alpha": "Gain a Pet Velociraptor Minion Card (+5 Str).",
+    "She's Melting!": "Gain a Vial of Liquid Witch consumable (+10 Str in one battle).",
     "My Hands are Awesome\u2026": "+1 max hand size.",
     "Big Boned!": "+1 chest armour slot.",
     "Touchdown!": "+3 Str. Discard to teleport directly to the Werbler tile (90).",
     "Rake It In!": "At chests/shops, you may discard an equipped item to draw a second item.",
     "No More Charlie Work!": "Once per turn, may fight monsters from the next tier up.",
     "Rat Smasher": "Auto-win against any monster with 'rat' or 'cat' in its name.",
-    "Immunized": "Negate the next curse you would receive (one use).",
+    "Immunized": "Negate the next curse you would receive.",
     "Rust Immunity": "Immune to curses that destroy or damage your weapons.",
     "Phallic Dexterity": "Immune to curses that destroy or interact with your footgear.",
     "8 Lives to Go!": "Discard this trait to remove one of your Tier 1 or 2 curses.",
@@ -297,10 +299,10 @@ TRAIT_DESCRIPTIONS: dict[str, str] = {
     "Fancy Footwork": "Reduce your movement value by 1 or 2 this turn.",
     "Residuals": "+1 Str token at the start of each of your turns.",
     "Vaxxed!": "Immune to all Tier 2 curses.",
-    "You're the Alpha!": "Each of your minions gains +1 Str permanently.",
-    "He's Just Misunderstood!": "Swamp Monsters give you their trait instead of fighting you.",
-    "I'm De Overlord Now.": "Gain a Skeletal Minion each time you defeat an undead monster.",
-    "New Lord in Town.": "Gain a Demon Minion each time you defeat a demon-type monster.",
+    "You're the Alpha!": "Each of your minions (current and future) gains +1 Str while you hold this trait. Tokens are removed if you lose it.",
+    "He's Just Misunderstood!": "Gain a Swamp Friend Minion Card (+7 Str).",
+    "I'm De Overlord Now.": "Gain a Minion Wrangler (+3 Str, buffs all other minions +2 Str each).",
+    "New Lord in Town.": "Gain a Demon Spawn Minion Card (+6 Str).",
     "Meat's Back On the Menu!": "Force an opponent to discard a minion; gain +5 Str tokens.",
     "Scavenger": "At chests/shops, may reject an item and draw another instead.",
     "Swiftness": "Flee any monster encounter at no cost (not the Werbler).",
@@ -318,43 +320,44 @@ CURSE_DESCRIPTIONS: dict[str, str] = {
     "Bad Vibes": "-1 Str permanently.",
     "Sapped": "-3 Str permanently.",
     "Blood Drain": "-4 Str permanently.",
-    "Don't Get It Wet!": "-2 Str. Your footgear slot functions at -2.",
+    "Don't Get It Wet!": "-2 Str permanently.",
+    "Don't Get it Wet": "Gain a Crazed Gremlin Minion Card (-2 Str).",
     "Bit More Plague": "-3 Str permanently.",
     "That'll Leave a Mark!": "-3 Str permanently.",
-    "Termites!": "-5 Str. Wooden items provide 0 Str.",
-    "Shot Through the Heart!": "-5 Str permanently.",
+    "Termites!": "-5 Str permanently.",
+    "Shot Through the Heart!": "Discard chest armour. Gunshot Wound (-3 Str, locked) placed in chest slot.",
     # Monster curses — conditional / equipment
-    "Nevernude": "Your chest armour is locked; it cannot be removed or traded.",
-    "Facial Coverings Required": "-3 Str unless you have a face covering equipped.",
-    "Stabbed": "-2 Str per weapon you have equipped.",
+    "Nevernude": "-5 Str for each empty equipment slot.",
+    "Facial Coverings Required": "-10 Str if you have no headgear equipped.",
+    "Stabbed": "-1 Str for each curse afflicting you.",
     "It Got In!": "Your footgear is destroyed immediately.",
     "The Rust is Spreading!": "Discard all equipped weapons immediately.",
-    "I Need a Place to Go!": "-1 to movement values and -1 hand size.",
-    "Laundry Day!": "Your chest and leg armour each lose 2 Str.",
-    "The Smell Won't Come Out!": "-1 Str to all your equipped items.",
-    "My Drink Tastes Funny\u2026": "Randomly lose or gain 1-3 Str from each fight.",
-    "Now, Cardinal, the Rack!": "-1 Str per turn until you win a fight.",
-    "Roughing the Kicker!": "Move back 5 spaces immediately.",
-    "Blacklisted!": "Cannot use shop tiles while this curse is active.",
-    "Quite the Setback!": "Move back 3 spaces immediately.",
-    "Yer a Hare, Wizard!": "Your movement values are doubled but you skip every other turn.",
-    "Eughghghghgh": "-2 to all movement card values.",
-    "Botched Circumcision": "Lose your footgear slot permanently.",
-    "Scared of the Dark": "-5 Str during Night.",
+    "I Need a Place to Go!": "If you're wearing boots, discard them.",
+    "Laundry Day!": "All armour (helmet, chest, legs) moved to pack or discarded.",
+    "The Smell Won't Come Out!": "Discard 2 equipped items.",
+    "My Drink Tastes Funny\u2026": "Discard 2 equipped items.",
+    "Now, Cardinal, the Rack!": "Discard 1 trait or equipped item per curse you have.",
+    "Roughing the Kicker!": "Move back 15 spaces immediately.",
+    "Blacklisted!": "Sent back to Start (tile 1).",
+    "Quite the Setback!": "Move back 10 spaces. Discard all 3 and 4 movement cards.",
+    "Yer a Hare, Wizard!": "6 movement cards become 1.",
+    "Eughghghghgh": "Snap! If you have more curses than traits, treat all 1 movement cards as a 0. If you play a 0, reactivate the current tile.",
+    "Botched Circumcision": "All movement cards −1 permanently (min 1).",
+    "Scared of the Dark": "-1 to all movement card values during Night.",
     "Dude, Where's My Card?": "-1 max hand size.",
-    "Together Forever!": "A monster follows you. On your tile, it fights alongside any enemy.",
+    "Together Forever!": "Lonely Teddy (-2 Str minion) joins your party.",
     "Get Rekt!": "Discard your highest-Str equipped item immediately.",
-    "They Flooded Your Base!": "All items below tile 31 in your inventory are discarded.",
-    "Clever Girl\u2026": "All Velociraptor-type monsters get +5 Str against you.",
-    "Out of Phase": "Random teleport 1-5 tiles forward or backward each turn.",
-    "Can't Stop the Music!": "Must fight to the tune — odd turns: -2 Str; even turns: +2 Str.",
-    "Enslaved!": "Once per turn, an opponent may direct one of your actions.",
+    "They Flooded Your Base!": "Your entire pack is cleared.",
+    "Clever Girl\u2026": "Your entire pack is cleared.",
+    "Out of Phase": "Pack limit reduced to 1 item.",
+    "Can't Stop the Music!": "Dancing Shoes (+1 Str, locked) forced onto your feet.",
+    "Enslaved!": "Give 2 of your items to an opponent.",
     "I Drank its Blood!": "-3 Str. Each vampire-type monster gains +5 Str against you.",
     "KNEEL!": "+10 Str to the Werbler per stack of this curse you have.",
     "It's Wriggling!": "Each time you gain a new curse, also lose one trait.",
-    "You're On the Menu\u2026": "All monsters get +3 Str against you.",
-    "Wait, You Lost to THIS?": "Walk of shame — move back 5 spaces. Self-removes on gain.",
-    "It's Taking Over!": "-3 Str. Each turn this curse is not removed, lose 1 more Str token.",
+    "You're On the Menu\u2026": "Bloody Stump (-2 Str, locked) placed in weapon or boot slot.",
+    "Wait, You Lost to THIS?": "...nothing happens. Absolutely mortifying.",
+    "It's Taking Over!": "Discard all items equipped to your legs and chest.",
     "So\u2026 Lethargic\u2026": "Each time you play a 3 or 4 movement card, lose 1 Str token.",
     "Bad Trip": "Your movement cards are drawn and played blind (random).",
     "Cursed!": "Auto-lose your next fight.",
@@ -424,6 +427,8 @@ _TRAIT_REGISTRY: dict[str, dict] = {
     "My Hands are Awesome\u2026":  {"hand_size_bonus": 1, "effect_id": "my_hands_awesome"},
     # Extra chest slot
     "Big Boned!":              {"chest_slot_bonus": 1},
+    # Gremlin minion grant
+    "Adorable":                {"effect_id": "adorable"},
     # Flat strength bonuses (already-registered entries: Hard Shell, Stomach of Steel, etc.)
     "Touchdown!":              {"effect_id": "touchdown", "strength_bonus": 3},
     # Deferred — complex behaviour not yet wired to engine
@@ -444,7 +449,7 @@ _TRAIT_REGISTRY: dict[str, dict] = {
     "Fancy Footwork":          {"effect_id": "fancy_footwork"},
     "Residuals":               {"effect_id": "residuals"},
     "Vaxxed!":                 {"effect_id": "vaxxed"},
-    "You're the Alpha!":       {"effect_id": "alpha"},  # same minion grant as 'Alpha'
+    "You're the Alpha!":       {"effect_id": "youre_the_alpha"},
     # Real card names for renamed / activated traits
     "He's Just Misunderstood!":    {"effect_id": "misunderstood"},
     "I'm De Overlord Now.":        {"effect_id": "overlord"},
@@ -461,6 +466,7 @@ _CURSE_REGISTRY: dict[str, dict] = {
     "Sapped":                  {"strength_bonus": -3},
     "Blood Drain":             {"strength_bonus": -4},
     "Don't Get It Wet!":       {"strength_bonus": -2},
+    "Don't Get it Wet":        {"effect_id": "dont_get_it_wet_gremlin"},
     # Conditional strength hooks
     "Nevernude":               {"effect_id": "nevernude"},
     "Facial Coverings Required":{"effect_id": "facial_coverings"},
@@ -504,7 +510,7 @@ _CURSE_REGISTRY: dict[str, dict] = {
     "Termites!":               {"strength_bonus": -5},
     # Newly implemented effects
     "Wait, You Lost to THIS?": {"effect_id": "walk_of_shame"},  # self-removes on gain; never in pool
-    "It's Taking Over!":       {"effect_id": "its_taking_over", "strength_bonus": -3},
+    "It's Taking Over!":       {"effect_id": "its_taking_over", "strength_bonus": 0},
     "So\u2026 Lethargic\u2026": {"effect_id": "so_lethargic"},
     "Bad Trip":                {"effect_id": "bad_trip"},
     "Cursed!":                 {"effect_id": "cursed_auto_lose"},
@@ -570,7 +576,8 @@ ALL_MONSTERS: list[Monster] = [
     Monster("Cat with a Grudge",     strength=9,  level=1,
             trait_name="8 Lives to Go!",          curse_name="That'll Leave a Mark!"),
     Monster("Gremlin Warrior",       strength=7,  level=1,
-            trait_name="Gremlin's Cunning",       curse_name="Don't Get It Wet!"),
+            description="Surprisingly Disciplined.",
+            trait_name="Adorable",               curse_name="Don't Get it Wet"),
     # ── Level 2 (strength 11-20) ─────────────────────────────────────────
     Monster("Stoned Golem",          strength=11, level=2,
             trait_name="My Hands are Awesome\u2026", curse_name="Dude, Where's My Card?"),

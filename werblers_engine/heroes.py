@@ -50,7 +50,8 @@ class Hero:
     shop_draw_count: int = 3        # Billfold overrides to 4
     can_flee_monsters: bool = False  # Billfold = True
     can_flee_miniboss: bool = False  # Billfold = True
-    flee_move_back: int = 0         # Billfold = 8
+    flee_move_back: int = 0         # Billfold = 13
+    movement_card_bonus: int = 0    # Billfold = 1 (all movement card values +1)
     has_contagious_mutagen: bool = False   # Gregory = True
     has_luscious_locks: bool = False       # Brunhilde = True
     has_skimpy_armour: bool = False        # Brunhilde = True
@@ -78,9 +79,11 @@ HEROES: dict[HeroId, Hero] = {
             "A sharp-eyed halfling merchant-prince draped in velvet and "
             "rings, who claims he's never lost a negotiation in his life."
         ),
+        shop_draw_count=4,
         can_flee_monsters=True,
         can_flee_miniboss=True,
-        flee_move_back=8,
+        flee_move_back=13,
+        movement_card_bonus=1,
     ),
     HeroId.GREGORY: Hero(
         id=HeroId.GREGORY,

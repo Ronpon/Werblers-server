@@ -186,6 +186,21 @@
   <img src="" alt="Card zoom">
 </div>
 
+<!-- Rake It In modal -->
+<div id="rake-it-in-modal" class="hidden">
+  <div class="modal-box" style="max-width:640px">
+    <div class="modal-title">🎰 Rake It In!</div>
+    <div class="rake-desc modal-desc"></div>
+    <div class="modal-section-label" style="margin-top:10px">Choose an equipped item to discard:</div>
+    <div class="rake-equips-row" style="display:flex;flex-wrap:wrap;gap:8px;margin:8px 0"></div>
+    <div class="rake-shop-section"></div>
+    <div class="modal-btns">
+      <button id="rake-confirm-btn" class="btn-primary" disabled onclick="resolveRakeItIn(true)">Rake It In!</button>
+      <button class="btn-secondary" onclick="resolveRakeItIn(false)">No Thanks</button>
+    </div>
+  </div>
+</div>
+
 <!-- No More Charlie Work decision modal -->
 <div id="charlie-work-modal" class="hidden">
   <div class="modal-box">

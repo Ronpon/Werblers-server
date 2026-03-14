@@ -628,6 +628,7 @@ def encounter_monster(
             if not_your_fault and decide_fn:
                 if decide_fn("It's Not Your Fault!: Discard to gain monster's Trait instead?", log):
                     player.traits.remove(not_your_fault)
+                    _fx.on_trait_lost(player, not_your_fault, log)
                     _fx.refresh_tokens(player)
                     trait = C.trait_for_monster(monster) if monster.trait_name else None
                     if trait is None:
@@ -719,7 +720,7 @@ def encounter_shop(
         log.append("Shop: no traits to trade \u2014 shop cannot be used.")
         return
 
-    draw_count = 3
+    draw_count = player.hero.shop_draw_count if player.hero else 3
 
     items = item_deck.draw_many(draw_count)
     if not items:
@@ -1072,6 +1073,7 @@ def _apply_werbler_loss(
             for t in list(chosen):
                 if t in player.traits:
                     player.traits.remove(t)
+                    _fx.on_trait_lost(player, t, log)
                     removed_names.append(t.name)
             _fx.refresh_tokens(player)
             log.append(f"  Slurp!: lost traits: {', '.join(removed_names)}.")
@@ -1088,8 +1090,12 @@ def encounter_miniboss(
     other_players: Optional[list] = None,
     select_fn: Optional[Callable] = None,
     crossroads_discards: Optional[list[Item]] = None,
+    pre_run_ogre: Optional[tuple[int, int]] = None,
 ) -> Optional[CombatResult]:
     """Fight a miniboss. Must win to progress.
+
+    ``pre_run_ogre`` (monster_mod, player_mod): when provided, skip calling
+    ``_ogre_pre_combat`` — it was already run at fight-start to update display.
 
     Parameters
     ----------
@@ -1112,15 +1118,20 @@ def encounter_miniboss(
     log.append(f"Miniboss: fighting {miniboss.name} (str {miniboss.strength})")
 
     # --- Pre-combat: Ogre Cutpurse pack pillage ---
-    ogre_monster_mod = 0
-    if miniboss.effect_id == "ogre_cutpurse":
-        ogre_monster_mod = _ogre_pre_combat(player, miniboss, log)
+    if pre_run_ogre is not None:
+        # Already run at fight-start (pre-fight display); use stored values.
+        ogre_monster_mod, ogre_player_mod_enc = pre_run_ogre
+    else:
+        ogre_monster_mod, ogre_player_mod_enc = 0, 0
+        if miniboss.effect_id == "ogre_cutpurse":
+            ogre_monster_mod, ogre_player_mod_enc = _ogre_pre_combat(player, miniboss, log)
 
     # --- Boss combat modifiers ---
     player_mod, monster_mod, auto_win = _apply_miniboss_modifiers(
         player, miniboss, log, is_night=is_night,
     )
     monster_mod += ogre_monster_mod
+    player_mod += ogre_player_mod_enc
 
     if auto_win:
         result = CombatResult.WIN

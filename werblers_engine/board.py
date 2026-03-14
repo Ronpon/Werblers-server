@@ -10,19 +10,21 @@ from .types import Tile, TileType
 
 # Fixed tile assignments
 _FIXED_TILES: dict[int, TileType] = {
+    1:  TileType.BLANK,    # START tile — always blank, always revealed
     30: TileType.MINIBOSS,
     60: TileType.MINIBOSS,
     90: TileType.WERBLER,
 }
 
-# Fixed tile-type counts for the 87 non-fixed tiles (rules.md §1).
+# Fixed tile-type counts for the 86 non-fixed tiles (rules.md §1).
+# Tile 1 (START) is in _FIXED_TILES, so it is excluded from the pool.
 # DayNight tiles are placed one per row by generate_board (9 total).
-# The remaining 78 slots are filled from this pool.
+# The remaining 77 slots are filled from this pool.
 _TILE_COUNTS: list[tuple[TileType, int]] = [
     (TileType.MONSTER,   16),
-    (TileType.CHEST,     28),
+    (TileType.CHEST,     33),
     (TileType.SHOP,      13),
-    (TileType.BLANK,     21),  # fills remainder so pool totals 78
+    (TileType.BLANK,     15),  # fills remainder so pool totals 77
 ]
 
 # Number of DayNight tiles (exactly 1 per row of 10).
@@ -39,7 +41,7 @@ def generate_board(seed: Optional[int] = None) -> list[Tile]:
 
     Fixed tiles: 30 → Miniboss, 60 → Miniboss, 90 → Werbler.
     Exactly one DAY_NIGHT tile is placed in each row of 10 tiles (9 total).
-    The remaining 78 slots are filled from the pool in _TILE_COUNTS, shuffled.
+    The remaining 77 slots are filled from the pool in _TILE_COUNTS, shuffled.
     DayNight, Miniboss, and Werbler tiles start revealed; all others start hidden.
     """
     rng = random.Random(seed)
@@ -48,7 +50,7 @@ def generate_board(seed: Optional[int] = None) -> list[Tile]:
     pool: list[TileType] = []
     for tile_type, count in _TILE_COUNTS:
         pool.extend([tile_type] * count)
-    assert len(pool) == 78, f"Non-DN pool should be 78, got {len(pool)}"
+    assert len(pool) == 77, f"Non-DN pool should be 77, got {len(pool)}"
     rng.shuffle(pool)
     pool_iter = iter(pool)
 
@@ -60,7 +62,7 @@ def generate_board(seed: Optional[int] = None) -> list[Tile]:
         start = row * 10 + 1
         end = start + 10  # exclusive
         non_fixed = [i for i in range(start, end) if i not in _FIXED_TILES]
-        dn_tile = rng.choice(non_fixed)
+        dn_tile = rng.choice(non_fixed)  # tile 1 is in _FIXED_TILES, never chosen here
         for i in range(start, end):
             if i in _FIXED_TILES:
                 tile_type = _FIXED_TILES[i]
@@ -72,7 +74,7 @@ def generate_board(seed: Optional[int] = None) -> list[Tile]:
                 TileType.DAY_NIGHT,
                 TileType.MINIBOSS,
                 TileType.WERBLER,
-            )
+            ) or i == 1  # tile 1 (START) is always visible
             board.append(Tile(index=i, tile_type=tile_type, revealed=always_visible))
 
     return board

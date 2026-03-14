@@ -118,9 +118,11 @@ class TestTraitStrengthEffects:
         assert p.total_strength == 5 + 5
 
     def test_bde_with_legs(self):
+        """BDE: no bonus when wearing leg armour."""
         p = _make_player(base_strength=5)
         p.traits.append(Trait("BDE", effect_id="bde"))
         _equip(p, "Greaves", EquipSlot.LEGS, bonus=2)
+        fx.refresh_tokens(p)
         assert p.total_strength == 5 + 2  # no BDE bonus, just greaves
 
     def test_tough_skin_empty_pack(self):
@@ -930,48 +932,42 @@ class TestLockedItem:
 
 
 # ===================================================================
-# Its Taking Over — curse linked to helmet
+# Its Taking Over — discard leg and chest armour on gain
 # ===================================================================
 
 class TestItsTakingOver:
 
-    def test_links_to_last_equipped_helmet(self):
+    def test_discards_leg_and_chest_on_gain(self):
         p = _make_player()
-        _equip(p, "Iron Helm", EquipSlot.HELMET)
-        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=-3)
+        _equip(p, "Iron Greaves", EquipSlot.LEGS, bonus=3)
+        _equip(p, "Leather Armour", EquipSlot.CHEST, bonus=2)
+        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=0)
         p.curses.append(curse)
         log: list[str] = []
         fx.on_curse_gained(p, curse, log)
-        assert curse.linked_item_name == "Iron Helm"
-        assert any("linked to" in msg for msg in log)
+        assert p.leg_armor == []
+        assert p.chest_armor == []
+        assert any("discarded" in msg for msg in log)
 
-    def test_no_helmet_curse_stays_permanently(self):
+    def test_no_armor_logs_nothing_discarded(self):
         p = _make_player()
-        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=-3)
+        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=0)
         p.curses.append(curse)
         log: list[str] = []
         fx.on_curse_gained(p, curse, log)
-        assert curse.linked_item_name == ""
-        assert any("permanently" in msg for msg in log)
+        assert p.leg_armor == []
+        assert p.chest_armor == []
+        assert any("nothing discarded" in msg for msg in log)
 
-    def test_curse_removed_when_linked_helmet_unequipped(self):
+    def test_only_legs_cleared_if_no_chest(self):
         p = _make_player()
-        helm = _equip(p, "Iron Helm", EquipSlot.HELMET)
-        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=-3)
-        curse.linked_item_name = "Iron Helm"
+        _equip(p, "Iron Greaves", EquipSlot.LEGS, bonus=3)
+        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=0)
         p.curses.append(curse)
-        p.unequip(helm)
-        assert curse not in p.curses
-
-    def test_curse_not_removed_for_unrelated_helmet_unequip(self):
-        p = _make_player()
-        _equip(p, "Iron Helm", EquipSlot.HELMET)
-        helm2 = _equip(p, "Fancy Hat", EquipSlot.HELMET)
-        curse = Curse("It's Taking Over!", effect_id="its_taking_over", strength_bonus=-3)
-        curse.linked_item_name = "Iron Helm"
-        p.curses.append(curse)
-        p.unequip(helm2)  # removes Fancy Hat, not Iron Helm
-        assert curse in p.curses
+        log: list[str] = []
+        fx.on_curse_gained(p, curse, log)
+        assert p.leg_armor == []
+        assert any("Iron Greaves" in msg for msg in log)
 
 
 # ===================================================================
@@ -980,31 +976,42 @@ class TestItsTakingOver:
 
 class TestGetRekt:
 
-    def test_default_blocks_helmet_slot(self):
+    def test_discards_highest_str_item(self):
+        p = _make_player()
+        helm = _equip(p, "Iron Helm", EquipSlot.HELMET, bonus=3)
+        boot = _equip(p, "Steel Boots", EquipSlot.LEGS, bonus=5)
+        curse = Curse("Get Rekt!", effect_id="get_rekt")
+        p.curses.append(curse)
+        log: list[str] = []
+        fx.on_curse_gained(p, curse, log)
+        # Steel Boots (+5) is highest — should be discarded
+        assert boot not in p.leg_armor
+        assert helm in p.helmets
+        assert any("Steel Boots" in msg and "Discarded" in msg for msg in log)
+
+    def test_no_items_logs_message(self):
         p = _make_player()
         curse = Curse("Get Rekt!", effect_id="get_rekt")
         p.curses.append(curse)
         log: list[str] = []
         fx.on_curse_gained(p, curse, log)
-        assert curse.helmet_slot_bonus == -1
-        assert any("helmet slot" in msg for msg in log)
+        assert any("no eligible" in msg for msg in log)
 
-    def test_decide_fn_false_blocks_chest_slot(self):
+    def test_locked_items_skipped(self):
         p = _make_player()
+        locked = Item("Locked Boots", EquipSlot.LEGS, strength_bonus=10,
+                      locked_by_curse_id="some_curse")
+        anchor = Curse("some_curse", effect_id="some_curse")
+        p.leg_armor.append(locked)
+        p.curses.append(anchor)
+        helm = _equip(p, "Helm", EquipSlot.HELMET, bonus=2)
         curse = Curse("Get Rekt!", effect_id="get_rekt")
         p.curses.append(curse)
         log: list[str] = []
-        fx.on_curse_gained(p, curse, log, decide_fn=lambda prompt, log: False)
-        assert curse.chest_slot_bonus == -1
-        assert any("chest slot" in msg for msg in log)
-
-    def test_decide_fn_true_blocks_helmet_slot(self):
-        p = _make_player()
-        curse = Curse("Get Rekt!", effect_id="get_rekt")
-        p.curses.append(curse)
-        log: list[str] = []
-        fx.on_curse_gained(p, curse, log, decide_fn=lambda prompt, log: True)
-        assert curse.helmet_slot_bonus == -1
+        fx.on_curse_gained(p, curse, log)
+        # Locked boots should be skipped; unlocked helm discarded
+        assert locked in p.leg_armor
+        assert helm not in p.helmets
 
     def test_blocked_helmet_slot_reduces_helmet_capacity(self):
         p = _make_player()

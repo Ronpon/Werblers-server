@@ -87,13 +87,13 @@ CONSUMABLE_CARDS: dict[str, dict] = {
         "name": "Priest\u2019s Blessing",
         "portrait": "Priest's Blessing.png",
         "output": "Priest's Blessing Card.png",
-        "desc": "Draw a Tier-1 Monster Card and gain its Trait.",
+        "desc": "Use before playing a movement card. Draw a Tier-1 Monster card to see its Curse. Gain its Trait.",
     },
     "many_priests_blessings": {
         "name": "Many Priests\u2019 Blessings",
         "portrait": "Many Priests' Blessings.png",
         "output": "Many Priests' Blessings Card.png",
-        "desc": "Draw a Tier-2 Monster Card and gain its Trait.",
+        "desc": "Use before playing a movement card. Draw a Tier-2 Monster card to see its Curse. Gain its Trait.",
     },
     "nectar_of_gods": {
         "name": "Nectar of the Gods",
@@ -130,12 +130,6 @@ CONSUMABLE_CARDS: dict[str, dict] = {
             "in your pack. You receive no trait or curse. You may play the monster while "
             "on an empty square and fight it like normal."
         ),
-    },
-    "priests_blessing": {
-        "name": "Priest\u2019s Blessing",
-        "portrait": "Priest's Blessing.png",
-        "output": "Priest\u2019s Blessing Card.png",
-        "desc": "Draw a Tier-1 Monster Card and gain its trait for yourself.",
     },
 }
 

@@ -10,6 +10,7 @@ from werblers_engine.game import Game
 from werblers_engine.heroes import HEROES, HeroId
 from werblers_engine.types import TileType
 from werblers_engine import content as C
+from werblers_engine import effects as _fx
 app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_DIR = os.path.join(BASE_DIR, "Images")
@@ -169,28 +170,84 @@ def api_resolve_offer():
     choices: dict = request.get_json(force=True) or {}
     result = _game.resolve_offer(choices=choices)
     combined_log = _pending_log + result.get("log", [])
+    _pending_log = combined_log
+    _last_log = combined_log
+    if result.get("phase") == "rake_it_in":
+        # Rake It In pauses before the turn ends — enrich equips/shop items with card images
+        equips = [
+            {**e, "card_image": _item_card_image_from_dict(e)}
+            for e in result.get("equips", [])
+        ]
+        shop_remaining = [
+            {**i, "card_image": _item_card_image_from_dict(i)}
+            for i in result.get("shop_remaining", [])
+        ]
+        return jsonify({
+            "phase": "rake_it_in",
+            "sub_type": result.get("sub_type", "chest"),
+            "equips": equips,
+            "shop_remaining": shop_remaining,
+            "state": _build_state(),
+            "log": combined_log,
+        })
+    _pending_log = []
+    return jsonify({"phase": "done", "state": _build_state()})
+
+@app.route("/api/resolve_rake_it_in", methods=["POST"])
+def api_resolve_rake_it_in():
+    """Resolve the Rake It In decision (phase == 'rake_it_in').
+
+    JSON body:
+        use_it          : bool
+        discard_slot    : "equip_helmet"|"equip_chest"|"equip_leg"|"equip_weapon"
+        discard_idx     : int
+        second_item_choice : int (shop only — which remaining item to take)
+        placement       : "equip"|"pack"  (for bonus item)
+    """
+    global _last_log, _pending_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    data: dict = request.get_json(force=True) or {}
+    use_it = bool(data.get("use_it", False))
+    discard_slot = str(data.get("discard_slot", ""))
+    discard_idx  = int(data.get("discard_idx", 0))
+    second_item_choice = int(data.get("second_item_choice", -1))
+    placement_choices = {k: data[k] for k in ("placement", "equip_action", "equip_item_index") if k in data}
+    result = _game.resolve_rake_it_in(
+        use_it=use_it,
+        discard_slot=discard_slot,
+        discard_idx=discard_idx,
+        second_item_choice=second_item_choice,
+        placement_choices=placement_choices,
+    )
+    combined_log = _pending_log + result.get("log", [])
     _pending_log = []
     _last_log = combined_log
-    return jsonify({"phase": "done", "state": _build_state()})
+    bonus = result.get("bonus_item")
+    if bonus:
+        bonus["card_image"] = _item_card_image_from_dict(bonus)
+    return jsonify({"phase": "done", "state": _build_state(), "bonus_item": bonus})
 
 @app.route("/api/equip_from_pack", methods=["POST"])
 def api_equip_from_pack():
     """Move an item from pack to an equipment slot.
-    
-    Accepts optional ``force`` flag to discard the first currently equipped
-    item in the target slot when no free slot is available.
+
+    Optional flags:
+      ``force``   -- discard the displaced item when no free slot available.
+      ``to_pack`` -- move the displaced item to the pack instead of discarding.
     """
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
     pack_index = int(data.get("pack_index", 0))
-    force = bool(data.get("force", False))
+    force   = bool(data.get("force",   False))
+    to_pack = bool(data.get("to_pack", False))
     player = _game.current_player
     if pack_index < 0 or pack_index >= len(player.pack):
         return jsonify({"error": "Invalid pack index"}), 400
     item = player.pack[pack_index]
     if not player.can_equip(item):
-        if force:
+        if force or to_pack:
             slot_map = {
                 "helmet": player.helmets,
                 "chest":  player.chest_armor,
@@ -199,7 +256,19 @@ def api_equip_from_pack():
             }
             existing_list = slot_map.get(item.slot.value, [])
             if existing_list:
-                player.unequip(existing_list[0])
+                displaced = existing_list[0]
+                if to_pack:
+                    # pack must have room for the displaced item
+                    # (the slot being equipped frees one item space later,
+                    #  but player.pack still contains the new item right now)
+                    # We check against pack_size - (len(pack) - 1) because
+                    # the new item leaves the pack when equipped.
+                    if len(player.pack) - 1 >= player.pack_size:
+                        return jsonify({"error": "Pack is full — can't swap to pack"}), 400
+                    player.unequip(displaced)
+                    player.add_to_pack(displaced)
+                else:
+                    player.unequip(displaced)
         if not player.can_equip(item):
             return jsonify({"error": f"Cannot equip {item.name} \u2014 no free slot"}), 400
     player.pack.pop(pack_index)
@@ -269,24 +338,180 @@ def api_manage_item():
 
     return jsonify({"error": f"Unknown action: {action}"}), 400
 
-@app.route("/api/use_consumable", methods=["POST"])
-def api_use_consumable():
-    """Use a consumable during the pre-fight phase.
-
-    Removes the consumable from the player's list and, if it has a plain
-    strength_bonus, stores it in _prefight_str_bonus so fight() can apply it.
-    """
+@app.route("/api/discard_consumable", methods=["POST"])
+def api_discard_consumable():
+    """Discard a consumable from the player's consumables list."""
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
-    if _game._pending_combat is None:
-        return jsonify({"error": "No pending combat — can only use consumables before a fight"}), 400
+    data: dict = request.get_json(force=True) or {}
+    idx = int(data.get("consumable_index", 0))
+    player = _game.current_player
+    if idx < 0 or idx >= len(player.consumables):
+        return jsonify({"error": "Invalid consumable index"}), 400
+    player.consumables.pop(idx)
+    return jsonify({"ok": True, "state": _build_state()})
+
+@app.route("/api/use_pack_consumable", methods=["POST"])
+def api_use_pack_consumable():
+    """Use a consumable item that is still in the player's pack (is_consumable=True).
+
+    Looks up the Consumable definition by the item's name, removes the item from
+    pack, and delegates to the same effect logic as /api/use_consumable for
+    overworld effects.  Combat-only effects are not supported this way.
+
+    JSON body:
+        pack_index       : int  (index in player.pack)
+        target_player_id : int  (optional, for give_curse)
+    """
+    global _last_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    import copy as _copy
+    data: dict = request.get_json(force=True) or {}
+    pack_idx = int(data.get("pack_index", 0))
+    player = _game.current_player
+    if pack_idx < 0 or pack_idx >= len(player.pack):
+        return jsonify({"error": "Invalid pack index"}), 400
+    item = player.pack[pack_idx]
+    if not item.is_consumable:
+        return jsonify({"error": "That item is not a consumable"}), 400
+    consumable = next((c for c in C.CONSUMABLE_POOL if c.name == item.name), None)
+    if consumable is None:
+        return jsonify({"error": f"Unknown consumable type: {item.name}"}), 400
+    consumable = _copy.copy(consumable)
+    # Remove from pack
+    player.pack.pop(pack_idx)
+
+    if consumable.effect_id == "gain_trait":
+        tier = consumable.effect_tier
+        deck = _game.monster_decks.get(tier)
+        if deck is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": f"Invalid tier {tier}"}), 400
+        drawn = deck.draw()
+        if drawn is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": f"Tier-{tier} monster deck is empty."}), 400
+        trait = (C.trait_for_monster(drawn) if drawn.trait_name else _game.trait_deck.draw())
+        if trait is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": "No traits available."}), 400
+        trait_log: list[str] = [f"{player.name} used {consumable.name}: drew {drawn.name}.",
+                                 f"{player.name} gained trait '{trait.name}'!"]
+        player.traits.append(trait)
+        _fx.on_trait_gained(player, trait, trait_log)
+        _fx.refresh_tokens(player)
+        _last_log = trait_log
+        return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
+                        "monster_name": drawn.name,
+                        "monster_card_image": _monster_card_image(drawn.name),
+                        "trait_desc": C.TRAIT_DESCRIPTIONS.get(trait.name, ""),
+                        "state": _build_state()})
+
+    elif consumable.effect_id == "give_curse":
+        tier = consumable.effect_tier
+        deck = _game.monster_decks.get(tier)
+        if deck is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": f"Invalid tier {tier}"}), 400
+        drawn = deck.draw()
+        if drawn is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": f"Tier-{tier} monster deck is empty."}), 400
+        curse = (C.curse_for_monster(drawn) if drawn.curse_name else _game.curse_deck.draw())
+        if curse is None:
+            player.pack.insert(pack_idx, item)
+            return jsonify({"error": "No curses available."}), 400
+        target_id = data.get("target_player_id", None)
+        all_players = _game.players
+        if target_id is not None:
+            chosen_target = next((p for p in all_players if p.player_id == int(target_id)), None)
+            target = chosen_target if chosen_target else (all_players[0] if all_players else player)
+        else:
+            others = [p for p in all_players if p is not player]
+            target = others[0] if others else player
+        curse_log = [f"{player.name} used {consumable.name}: drew {drawn.name}.",
+                     f"{target.name} received curse '{curse.name}'!"]
+        target.curses.append(curse)
+        _fx.on_curse_gained(target, curse, curse_log, None, [p for p in _game.players if p is not target], None)
+        _fx.refresh_tokens(target)
+        _last_log = curse_log
+        return jsonify({"ok": True, "phase": "curse_given", "curse_name": curse.name,
+                        "target_name": target.name, "monster_name": drawn.name,
+                        "monster_card_image": _monster_card_image(drawn.name),
+                        "curse_desc": C.CURSE_DESCRIPTIONS.get(curse.name, ""),
+                        "state": _build_state()})
+
+    player.pack.insert(pack_idx, item)
+    return jsonify({"error": f"Unsupported consumable effect: {consumable.effect_id}"}), 400
+
+@app.route("/api/use_consumable", methods=["POST"])
+def api_use_consumable():
+    """Use a consumable.
+
+    Combat-only effects (strength_bonus, monster_str_mod, capture_monster) require
+    an active pre-fight phase.  Overworld effects (gain_trait, give_curse) work
+    at any time.
+    """
+    global _last_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
     idx = int(data.get("consumable_index", 0))
     player = _game.current_player
     if idx < 0 or idx >= len(player.consumables):
         return jsonify({"error": "Invalid consumable index"}), 400
     consumable = player.consumables.pop(idx)
+
+    # ------------------------------------------------------------------ COMBAT-ONLY
     if consumable.effect_id == "capture_monster":
+        if _game._pending_combat is None:
+            # Outside combat: use the device to START a fight with a tier-appropriate monster
+            tier = consumable.effect_tier
+            deck = _game.monster_decks.get(tier)
+            if deck is None:
+                player.consumables.insert(idx, consumable)
+                return jsonify({"error": f"Invalid tier {tier}"}), 400
+            monster = deck.draw()
+            if monster is None:
+                player.consumables.insert(idx, consumable)
+                return jsonify({"error": f"Tier-{tier} monster deck is empty \u2014 no monster to summon."}), 400
+            # Capture device is consumed to summon the fight
+            log = [f"{player.name} activates {consumable.name}: a {monster.name} appears!"]
+            other_players = [p for p in _game.players if p is not player]
+            has_reroll = any(t.effect_id in ("ill_come_in_again", "i_see_everything") for t in player.traits)
+            _game._prefight_str_bonus = 0
+            _game._prefight_monster_str_bonus = 0
+            _game._pending_combat = {
+                "monster": monster,
+                "effective_deck": deck,
+                "other_players": other_players,
+                "level": tier,
+                "log": log,
+                "old_pos": player.position,
+                "new_pos": player.position,
+                "card_value": 0,
+                "tile_type": "MONSTER",
+                "ill_come_in_again_available": has_reroll,
+                "capture_device_triggered": True,  # marks this as device-initiated
+            }
+            combat_info = {
+                "monster_name": monster.name,
+                "monster_strength": monster.strength,
+                "player_strength": player.combat_strength(),
+                "player_id": player.player_id,
+                "player_name": player.name,
+                "hero_id": player.hero.id.name if player.hero else None,
+                "category": "monster",
+                "level": tier,
+                "result": None,
+                "ill_come_in_again_available": has_reroll,
+            }
+            _game._last_combat_info = combat_info
+            _last_log = log
+            return jsonify({"ok": True, "phase": "combat", "state": _build_state(),
+                            "combat_info": _enrich_combat_info(combat_info)})
+        # During combat: capture the current monster
         pc = _game._pending_combat
         monster = pc.get("monster") if pc else None
         if monster is None:
@@ -296,21 +521,103 @@ def api_use_consumable():
             player.consumables.insert(idx, consumable)
             return jsonify({"error": f"Capture device Tier {consumable.effect_tier} is too weak for a Level {monster.level} monster"}), 400
         if not player.add_captured_monster(monster):
-            player.consumables.insert(idx, consumable)
-            return jsonify({"error": "Pack is full — cannot capture monster"}), 400
+            # The consumable was just removed (freeing its pack slot), so the
+            # captured monster always takes that same slot — bypass the size check.
+            player.captured_monsters.append(monster)
         log = pc["log"]
         log.append(f"  {consumable.name}: {monster.name} captured!")
         _game._pending_combat = None
         _game._finish_post_encounter(player, log)
         _game._advance_turn()
-        global _last_log
         _last_log = log
         return jsonify({"ok": True, "phase": "captured", "monster_name": monster.name, "state": _build_state()})
-    elif consumable.effect_id == "" and consumable.strength_bonus > 0:
+
+    if consumable.effect_id == "" and consumable.strength_bonus > 0:
+        if _game._pending_combat is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": "Strength potions can only be used before a fight."}), 400
         _game._prefight_str_bonus += consumable.strength_bonus
+
     elif consumable.effect_id == "monster_str_mod":
+        if _game._pending_combat is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": "Monster-weakening vials can only be used before a fight."}), 400
         _game._prefight_monster_str_bonus += consumable.effect_value
-    # Update the stored combat_info to reflect new bonuses
+
+    # ------------------------------------------------------------------ OVERWORLD: gain_trait
+    elif consumable.effect_id == "gain_trait":
+        tier = consumable.effect_tier
+        deck = _game.monster_decks.get(tier)
+        if deck is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": f"Invalid tier {tier}"}), 400
+        drawn = deck.draw()
+        if drawn is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": f"Tier-{tier} monster deck is empty — no effect."}), 400
+        trait = (
+            C.trait_for_monster(drawn) if drawn.trait_name
+            else _game.trait_deck.draw()
+        )
+        if trait is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": "No traits available."}), 400
+        trait_log: list[str] = []
+        player.traits.append(trait)
+        trait_log.append(f"{player.name} used {consumable.name}: drew {drawn.name}.")
+        trait_log.append(f"{player.name} gained trait '{trait.name}'!")
+        _fx.on_trait_gained(player, trait, trait_log)
+        _fx.refresh_tokens(player)
+        _last_log = trait_log
+        return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
+                        "monster_name": drawn.name,
+                        "monster_card_image": _monster_card_image(drawn.name),
+                        "trait_desc": C.TRAIT_DESCRIPTIONS.get(trait.name, ""),
+                        "state": _build_state()})
+
+    # ------------------------------------------------------------------ OVERWORLD: give_curse
+    elif consumable.effect_id == "give_curse":
+        tier = consumable.effect_tier
+        deck = _game.monster_decks.get(tier)
+        if deck is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": f"Invalid tier {tier}"}), 400
+        drawn = deck.draw()
+        if drawn is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": f"Tier-{tier} monster deck is empty — no effect."}), 400
+        curse = (
+            C.curse_for_monster(drawn) if drawn.curse_name
+            else _game.curse_deck.draw()
+        )
+        if curse is None:
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": "No curses available."}), 400
+        # Target: chosen by client — can be any player including self
+        target_id = data.get("target_player_id", None)
+        all_players = _game.players
+        if target_id is not None:
+            chosen_target = next((p for p in all_players if p.player_id == int(target_id)), None)
+            target = chosen_target if chosen_target else (all_players[0] if all_players else player)
+        else:
+            others = [p for p in all_players if p is not player]
+            target = others[0] if others else player
+        curse_log: list[str] = []
+        curse_log.append(f"{player.name} used {consumable.name}: drew {drawn.name}.")
+        target.curses.append(curse)
+        curse_log.append(f"{target.name} received curse '{curse.name}'!")
+        _fx.on_curse_gained(target, curse, curse_log, None, [p for p in _game.players if p is not target], None)
+        _fx.refresh_tokens(target)
+        _last_log = curse_log
+        return jsonify({"ok": True, "phase": "curse_given", "curse_name": curse.name,
+                        "target_name": target.name,
+                        "monster_name": drawn.name,
+                        "monster_card_image": _monster_card_image(drawn.name),
+                        "curse_desc": C.CURSE_DESCRIPTIONS.get(curse.name, ""),
+                        "state": _build_state()})
+
+    # ------------------------------------------------------------------ Combat info update
+    # (only reached for the combat-only strength effects above)
     ability_mod = _game._last_combat_info.get("ability_player_mod", 0) if _game._last_combat_info else 0
     if _game._last_combat_info:
         _game._last_combat_info["player_strength"] = player.combat_strength() + _game._prefight_str_bonus + ability_mod
@@ -320,6 +627,100 @@ def api_use_consumable():
         )
         _game._last_combat_info["prefight_str_bonus"] = _game._prefight_str_bonus
     return jsonify({"ok": True, "state": _build_state(), "combat_info": _enrich_combat_info(dict(_game._last_combat_info)) if _game._last_combat_info else None})
+
+@app.route("/api/bystander_consumable", methods=["POST"])
+def api_bystander_consumable():
+    """Non-fighting nearby player uses (or skips) a consumable at combat start.
+
+    Body: {player_id: int, consumable_index: int | null, skip: bool}
+    The caller must be in the nearby_queue list of the pending combat.
+    """
+    global _last_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    if _game._pending_combat is None:
+        return jsonify({"error": "No pending combat"}), 400
+    data: dict = request.get_json(force=True) or {}
+    bystander_id = int(data.get("player_id", -1))
+    skip: bool = bool(data.get("skip", False))
+    consumable_index = data.get("consumable_index", None)
+
+    bystander = next((p for p in _game.players if p.player_id == bystander_id), None)
+    if bystander is None:
+        return jsonify({"error": f"Unknown player_id {bystander_id}"}), 400
+
+    pc = _game._pending_combat
+    nearby_queue: list = pc.get("nearby_queue", [])
+    if bystander_id not in nearby_queue:
+        return jsonify({"error": "Player is not in the nearby queue"}), 400
+
+    # Remove from queue regardless of action
+    nearby_queue.remove(bystander_id)
+    pc["nearby_queue"] = nearby_queue
+
+    log = pc.get("log", [])
+
+    if not skip and consumable_index is not None:
+        cidx = int(consumable_index)
+        # Only monster_str_mod consumables are allowed for bystanders
+        usable = [c for c in bystander.consumables if c.effect_id == "monster_str_mod"]
+        if 0 <= cidx < len(usable):
+            chosen = usable[cidx]
+            bystander.consumables.remove(chosen)
+            monster = pc.get("monster")
+            if monster:
+                delta = chosen.effect_value
+                old_str = monster.strength
+                monster.strength = max(0, monster.strength + delta)
+                sign = "+" if delta >= 0 else ""
+                log.append(
+                    f"  {bystander.name} used {chosen.name} on {monster.name}: "
+                    f"monster strength {sign}{delta} ({old_str} \u2192 {monster.strength})."
+                )
+                # Update cached combat info
+                if _game._last_combat_info:
+                    _game._last_combat_info["monster_strength"] = monster.strength
+
+    _last_log = log
+
+    # Return updated combat info with remaining queue
+    combat_info = _enrich_combat_info(dict(_game._last_combat_info)) if _game._last_combat_info else None
+    if combat_info is not None:
+        # Rebuild nearby_queue list for the response
+        remaining_players = [p for p in _game.players
+                             if p.player_id in nearby_queue]
+        combat_info["nearby_queue"] = [
+            {
+                "player_id":   bp.player_id,
+                "name":        bp.name,
+                "token_image": _TOKEN_MAP.get(bp.hero.id.name if bp.hero else "", ""),
+                "consumables": [{"name": c.name, "card_image": _consumable_card_image(c.name),
+                                 "effect_id": c.effect_id, "effect_value": c.effect_value,
+                                 "effect_tier": c.effect_tier, "strength_bonus": c.strength_bonus}
+                                for c in bp.consumables if c.effect_id == "monster_str_mod"],
+            }
+            for bp in remaining_players
+        ]
+    return jsonify({"ok": True, "combat_info": combat_info, "state": _build_state()})
+
+@app.route("/api/flee", methods=["POST"])
+def api_flee():
+    """Billfold: Fly, you dummy! — flee the pending monster or miniboss combat."""
+    global _last_log
+    try:
+        if _game is None:
+            return jsonify({"error": "No game in progress"}), 400
+        result = _game.flee_monster()
+        if "error" in result:
+            return jsonify(result), 400
+        _last_log = result.get("log", [])
+        return jsonify({"phase": "done", "state": _build_state()})
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        traceback.print_exc()
+        return jsonify({"error": f"Server error during flee: {exc}\n\nTraceback:\n{tb}"}), 500
+
 
 @app.route("/api/fight", methods=["POST"])
 def api_fight():
@@ -383,6 +784,9 @@ def api_play_turn():
 # State serialisation helpers
 # ---------------------------------------------------------------------------
 def _tile_image(tile, is_night: bool, mb1_defeated: bool = False, mb2_defeated: bool = False) -> str:
+    # Tile 1 (START) always shows as a blank tile regardless of night or state
+    if tile.index == 1:
+        return "Tiles/Blank Tile.png"
     # Special tiles always show their real image regardless of time or reveal state
     if tile.tile_type == TileType.DAY_NIGHT:
         return "Tiles/Day and Night Tile.png"
@@ -413,11 +817,21 @@ _SLOT_IMG_FOLDER = {
     "legs":   "Items/Leg Armour/Leg Armour Finished Cards",
     "weapon": "Items/Weapons/Weapon Finished Cards",
 }
+_ITEM_FILENAME_OVERRIDES: dict[str, str] = {
+    # Game data uses "Swiss Guard Helmet" (no apostrophe) but the card file is named with one
+    "Swiss Guard Helmet": "Swiss Guard's Helmet",
+}
+
+def _normalize_item_filename(name: str) -> str:
+    """Replace curly/smart apostrophes with straight ones so filenames match disk."""
+    return name.replace('\u2019', "'").replace('\u2018', "'")
+
 def _item_card_image(item) -> str:
     if item.slot.value == "consumable":
         return _consumable_card_image(item.name)
     folder = _SLOT_IMG_FOLDER.get(item.slot.value, "")
-    return f"{folder}/{item.name} Card.png" if folder else ""
+    display = _ITEM_FILENAME_OVERRIDES.get(item.name, _normalize_item_filename(item.name))
+    return f"{folder}/{display} Card.png" if folder else ""
 
 def _item_card_image_from_dict(item_dict: dict) -> str:
     slot = item_dict.get("slot", "")
@@ -425,14 +839,17 @@ def _item_card_image_from_dict(item_dict: dict) -> str:
     if slot == "consumable":
         return _consumable_card_image(name)
     folder = _SLOT_IMG_FOLDER.get(slot, "")
-    return f"{folder}/{name} Card.png" if folder else ""
+    display = _ITEM_FILENAME_OVERRIDES.get(name, _normalize_item_filename(name))
+    return f"{folder}/{display} Card.png" if folder else ""
 
 def _tile_level(pos: int) -> int:
     if pos <= 30: return 1
     if pos <= 60: return 2
     return 3
 def _consumable_card_image(name: str) -> str:
-    return f"Items/Consumables/Consumable Finished Cards/{name} Card.png"
+    # Normalize curly apostrophes to straight for filesystem path matching
+    safe_name = name.replace('\u2019', "'").replace('\u2018', "'")
+    return f"Items/Consumables/Consumable Finished Cards/{safe_name} Card.png"
 def _monster_card_image(name: str) -> str:
     return f"Monsters/Finished Cards/{name} Card.png"
 
@@ -482,6 +899,30 @@ def _enrich_combat_info(info: dict) -> dict:
         )
         info["player_traits"] = [_ser_trait(t) for t in player.traits]
         info["player_curses"] = [_ser_curse(c) for c in player.curses]
+        # Compute nearby-player bystander queue (within 5 tiles, has combat consumables)
+        if "nearby_queue" not in info and _game._pending_combat is not None:
+            _PROXIMITY = 5
+            other_players = _game._pending_combat.get("other_players", [])
+            queue = []
+            for bp in other_players:
+                if abs(bp.position - player.position) > _PROXIMITY:
+                    continue
+                usable = [c for c in bp.consumables if c.effect_id == "monster_str_mod"]
+                if not usable:
+                    continue
+                queue.append({
+                    "player_id":   bp.player_id,
+                    "name":        bp.name,
+                    "token_image": _TOKEN_MAP.get(bp.hero.id.name if bp.hero else "", ""),
+                    "consumables": [{"name": c.name, "card_image": _consumable_card_image(c.name),
+                                     "effect_id": c.effect_id, "effect_value": c.effect_value,
+                                     "effect_tier": c.effect_tier, "strength_bonus": c.strength_bonus}
+                                    for c in usable],
+                })
+            info["nearby_queue"] = queue
+            # Persist queue in pending_combat for the bystander endpoint
+            if _game._pending_combat is not None:
+                _game._pending_combat["nearby_queue"] = [q["player_id"] for q in queue]
         info["player_minions"] = [{"name": m.name, "strength_bonus": m.strength_bonus, "card_image": _minion_card_image(m.name)} for m in player.minions]
         info["player_base_strength"] = player.base_strength
         info["player_helmet_slots"] = player.helmet_slots
@@ -524,9 +965,11 @@ def _ser_item(item) -> dict:
     }
 def _ser_trait(t) -> dict:
     return {"name": t.name, "effect_id": t.effect_id, "tokens": t.tokens,
+            "strength_bonus": t.strength_bonus,
             "description": C.TRAIT_DESCRIPTIONS.get(t.name, "")}
 def _ser_curse(c) -> dict:
     return {"name": c.name, "effect_id": c.effect_id, "tokens": c.tokens,
+            "strength_bonus": c.strength_bonus,
             "description": C.CURSE_DESCRIPTIONS.get(c.name, "")}
 def _build_state() -> dict:
     g = _game
@@ -561,7 +1004,7 @@ def _build_state() -> dict:
             "leg_armor":          [_ser_item(i) for i in p.leg_armor],
             "weapons":            [_ser_item(i) for i in p.weapons],
             "pack":               [_ser_item(i) for i in p.pack],
-            "consumables":        [{"name": c.name, "card_image": _consumable_card_image(c.name), "strength_bonus": c.strength_bonus, "effect_id": c.effect_id, "effect_tier": c.effect_tier} for c in p.consumables],
+            "consumables":        [{"name": c.name, "card_image": _consumable_card_image(c.name), "strength_bonus": c.strength_bonus, "effect_id": c.effect_id, "effect_tier": c.effect_tier, "effect_value": c.effect_value} for c in p.consumables],
             "captured_monsters":  [{"name": m.name, "card_image": _monster_card_image(m.name), "level": m.level} for m in p.captured_monsters],
             "traits":             [_ser_trait(t) for t in p.traits],
             "curses":             [_ser_curse(c) for c in p.curses],
@@ -574,11 +1017,14 @@ def _build_state() -> dict:
             "pack_size":          p.pack_size,
             "miniboss1_defeated": p.miniboss1_defeated,
             "miniboss2_defeated": p.miniboss2_defeated,
+            "base_strength":       p.base_strength,
             "weapon_hands":          p.weapon_hands,
             "movement_discard_top":   p.movement_discard[-1] if p.movement_discard else None,
             "movement_discard_count": len(p.movement_discard),
             "movement_discard_list":  list(p.movement_discard),
             "movement_deck_cards":    g.movement_decks[p.player_id].peek_all(),
+            "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
+            "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
         })
     return {
         "turn_number":       g.turn_number,

@@ -124,7 +124,7 @@ class Curse:
     name: str
     effect_id: str = ""            # hook identifier for complex effects
     source_monster: str = ""       # which monster inflicted this
-    linked_item_name: str = ""     # item this curse is anchored to (e.g. its_taking_over ↔ helmet)
+    linked_item_name: str = ""     # item this curse is anchored to (legacy field, reserved for future use)
     strength_bonus: int = 0   # typically negative
     hand_size_bonus: int = 0  # typically negative or 0
     move_bonus: int = 0

@@ -685,8 +685,8 @@ WEAPON_CARDS: dict[str, dict] = {
     },
     "inconveniently_large_sword": {
         "name": "Inconveniently Large Sword",
-        "type": "3H Weapon",
-        "strength": "+18",
+        "type": "4H Weapon",
+        "strength": "+25",
         "portrait": "Inconveniently Large Sword.png",
         "output": "Inconveniently Large Sword Card.png",
         "blurb": "You probably can\u2019t lift it.",

@@ -91,7 +91,8 @@ MONSTERS: dict[str, dict] = {
             "name": "Eughghghghgh",
             "text": (
                 "Snap! If you have more Curses than Traits, treat "
-                "all 1 movement cards as a 0. The tile still activates."
+                "all 1 movement cards as a 0. If you play a 0, "
+                "reactivate the current tile."
             ),
         },
     },
@@ -189,8 +190,8 @@ MONSTERS: dict[str, dict] = {
         "curse": {
             "name": "It's Taking Over!",
             "text": (
-                "If you are wearing a helmet, put this card under it. "
-                "It has -3 Str. until you discard it. When you do, discard this card."
+                "Something itches - Discard any items "
+                "equipped to your legs or chest."
             ),
         },
     },
@@ -252,8 +253,7 @@ MONSTERS: dict[str, dict] = {
         "curse": {
             "name": "Get Rekt",
             "text": (
-                "Place this card on either your helmet or chest slot. "
-                "You cannot equip anything there."
+                "Discard your highest-Str equipped item."
             ),
         },
     },
