@@ -1,0 +1,8 @@
+---
+Item Card: Sweet Bandana
+Type: Helmet
+Strength Bonus: +2
+Description: Lookin’ good!
+Portrait: [Insert Sweet Bandana image here]
+Ability: None
+---

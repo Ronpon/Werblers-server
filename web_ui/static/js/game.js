@@ -1,0 +1,1796 @@
+﻿// ================================================================ GLOBAL STATE
+let gameState   = null;
+let viewingPlayerId = 0;
+let numPlayers  = 1;
+let heroSelections = {};   // slot (int) -> heroId string
+let heroData    = [];
+// Ability toggles collected before playing a card
+let abilityChoices = {};   // { ability_id: true | {args} }
+
+// ================================================================ MUSIC
+const _music = { audio: null, current: null, masterVol: 0.8, musicVol: 0.8 };
+
+function _musicVol() { return Math.min(1, _music.masterVol * _music.musicVol); }
+
+function playMusic(name) {
+  if (_music.current === name) return;
+  if (_music.audio) { _music.audio.pause(); _music.audio = null; }
+  _music.current = name;
+  const audio = new Audio('/music/' + encodeURIComponent(name));
+  audio.loop = true;
+  audio.volume = _musicVol();
+  audio.play().catch(() => {});
+  _music.audio = audio;
+}
+
+function _updateAudioVolume() {
+  if (_music.audio) _music.audio.volume = _musicVol();
+}
+
+function _tierMusic(pos) {
+  if (pos <= 30) return 'Tier 1 Music.wav';
+  if (pos <= 60) return 'Tier 2 Music.wav';
+  return 'Tier-3 Music.wav';
+}
+
+function _resumeTierMusic(state) {
+  const s = state || gameState;
+  if (!s) { playMusic('Theme Music.wav'); return; }
+  const p = s.players.find(x => x.is_current) || s.players[0];
+  if (p) playMusic(_tierMusic(p.position));
+}
+
+// ================================================================ OPTIONS
+function openOptionsModal()  { document.getElementById('options-modal').classList.remove('hidden'); }
+function closeOptionsModal() { document.getElementById('options-modal').classList.add('hidden'); }
+
+function setMasterVolume(val) {
+  _music.masterVol = parseInt(val) / 100;
+  document.getElementById('vol-master-val').textContent = val;
+  _updateAudioVolume();
+}
+function setMusicVolume(val) {
+  _music.musicVol = parseInt(val) / 100;
+  document.getElementById('vol-music-val').textContent = val;
+  _updateAudioVolume();
+}
+// ================================================================ SETUP
+async function initSetup() {
+  playMusic('Theme Music.wav');
+  // Browsers block autoplay before a user gesture. Retry on first interaction.
+  document.addEventListener('click', function _unlockAudio() {
+    document.removeEventListener('click', _unlockAudio, true);
+    if (_music.audio && _music.audio.paused) _music.audio.play().catch(() => {});
+  }, true);
+  const resp = await fetch('/api/heroes');
+  heroData = await resp.json();
+  setNumPlayers(1);
+}
+function setNumPlayers(n) {
+  numPlayers = n;
+  document.querySelectorAll('.count-btn').forEach(btn => {
+    btn.classList.toggle('active', parseInt(btn.dataset.n) === n);
+  });
+  for (let i = n; i < 4; i++) delete heroSelections[i];
+  renderHeroSelectors();
+}
+function renderHeroSelectors() {
+  const container = document.getElementById('hero-selectors');
+  container.innerHTML = '';
+  for (let slot = 0; slot < numPlayers; slot++) {
+    const slotDiv = document.createElement('div');
+    slotDiv.className = 'hero-slot';
+    const label = document.createElement('div');
+    label.className = 'slot-label';
+    label.textContent = numPlayers > 1 ? `Player ${slot + 1}` : 'Choose Your Hero';
+    slotDiv.appendChild(label);
+    const cardRow = document.createElement('div');
+    cardRow.className = 'hero-cards-row';
+    for (const hero of heroData) {
+      const takenByOther = Object.entries(heroSelections)
+        .some(([s, id]) => parseInt(s) !== slot && id === hero.id);
+      const isSelected = heroSelections[slot] === hero.id;
+      const card = document.createElement('div');
+      card.className = 'hero-card-option'
+        + (isSelected   ? ' selected' : '')
+        + (takenByOther ? ' taken'    : '');
+      const img = document.createElement('img');
+      img.src = `/images/${hero.card_image}`;
+      img.alt = hero.name;
+      const nameEl = document.createElement('span');
+      nameEl.className = 'hero-option-name';
+      nameEl.textContent = hero.name;
+      card.appendChild(img);
+      card.appendChild(nameEl);
+      if (!takenByOther) {
+        card.addEventListener('click', () => {
+          heroSelections[slot] = hero.id;
+          renderHeroSelectors();
+          checkStartEnabled();
+        });
+      }
+      // Hover preview — show full card image
+      card.addEventListener('mouseenter', (e) => {
+        const tip = _getPreviewEl();
+        tip.innerHTML = `<img src="/images/${hero.card_image}" alt="${hero.name}">`;
+        tip.classList.remove('hidden');
+        _positionPreview(e);
+      });
+      card.addEventListener('mousemove', _positionPreview);
+      card.addEventListener('mouseleave', () => _getPreviewEl().classList.add('hidden'));
+      cardRow.appendChild(card);
+    }
+    slotDiv.appendChild(cardRow);
+    container.appendChild(slotDiv);
+  }
+  checkStartEnabled();
+}
+function checkStartEnabled() {
+  let ok = true;
+  for (let i = 0; i < numPlayers; i++) if (!heroSelections[i]) { ok = false; break; }
+  document.getElementById('start-btn').disabled = !ok;
+}
+async function startGame() {
+  const heroIds = [];
+  for (let i = 0; i < numPlayers; i++) heroIds.push(heroSelections[i]);
+  const resp = await fetch('/api/new_game', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hero_ids: heroIds }),
+  });
+  const data = await resp.json();
+  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('game-screen').classList.remove('hidden');
+  viewingPlayerId = data.state.current_player_id;
+  applyState(data.state);
+  _resumeTierMusic(data.state);
+  await loadAndRenderAbilities();
+}
+// ================================================================ BOARD
+function tileToGrid(n) {
+  const rowFromBottom = Math.floor((n - 1) / 10);
+  const colInRow      = (n - 1) % 10;
+  const row = 8 - rowFromBottom;
+  const col = rowFromBottom % 2 === 0 ? colInRow : 9 - colInRow;
+  return { row, col };
+}
+function tileLevel(n) {
+  if (n <= 30) return 1;
+  if (n <= 60) return 2;
+  return 3;
+}
+let _boardBuilt = false;
+const _tileEls  = {};
+function buildBoard() {
+  if (_boardBuilt) return;
+  const grid = document.getElementById('board-grid');
+  grid.innerHTML = '';
+  for (let n = 1; n <= 90; n++) {
+    const { row, col } = tileToGrid(n);
+    const div = document.createElement('div');
+    div.className = `tile level-${tileLevel(n)}`;
+    div.style.gridRow    = row + 1;
+    div.style.gridColumn = col + 1;
+    div.dataset.index = n;
+    const img = document.createElement('img');
+    img.className = 'tile-bg';
+    img.alt = `Tile ${n}`;
+    div.appendChild(img);
+    const numLabel = document.createElement('span');
+    numLabel.className = 'tile-number';
+    numLabel.textContent = n;
+    div.appendChild(numLabel);
+    const tokenArea = document.createElement('div');
+    tokenArea.className = 'token-area';
+    div.appendChild(tokenArea);
+    grid.appendChild(div);
+    _tileEls[n] = div;
+  }
+  _boardBuilt = true;
+}
+function updateBoard(state) {
+  buildBoard();
+  for (const tile of state.board) {
+    const el = _tileEls[tile.index];
+    if (el) el.querySelector('img.tile-bg').src = `/images/${tile.image}`;
+  }
+  for (let n = 1; n <= 90; n++) {
+    _tileEls[n].querySelector('.token-area').innerHTML = '';
+  }
+  const byPos = {};
+  for (const p of state.players) {
+    (byPos[p.position] = byPos[p.position] || []).push(p);
+  }
+  for (const [posStr, players] of Object.entries(byPos)) {
+    const pos = parseInt(posStr);
+    const tileEl = _tileEls[pos];
+    if (!tileEl) continue;
+    const sorted = [...players].sort((a, b) => {
+      if (a.is_current) return 1;
+      if (b.is_current) return -1;
+      return a.player_id - b.player_id;
+    });
+    const tokenArea = tileEl.querySelector('.token-area');
+    sorted.forEach((p, stackIdx) => {
+      if (!p.token_image) return;
+      const img = document.createElement('img');
+      img.className = 'player-token' + (p.is_current ? ' current-player-token' : '');
+      img.src   = `/images/${p.token_image}`;
+      img.alt   = p.name;
+      img.title = p.name;
+      img.style.right  = `${4 + stackIdx * 8}px`;
+      img.style.bottom = `${4 + stackIdx * 8}px`;
+      img.style.zIndex = stackIdx + 10;
+      tokenArea.appendChild(img);
+    });
+  }
+  const timeEl = document.getElementById('time-indicator');
+  if (state.is_night) {
+    timeEl.textContent = '\uD83C\uDF19 Night';
+    timeEl.className = 'night';
+  } else {
+    timeEl.textContent = '\u2600 Day';
+    timeEl.className = 'day';
+  }
+}
+// ================================================================ PLAYER TABS
+function updatePlayerTabs(state) {
+  const tabs = document.getElementById('player-tabs');
+  tabs.innerHTML = '';
+  for (const p of state.players) {
+    const btn = document.createElement('button');
+    btn.className = 'tab-btn'
+      + (p.player_id === viewingPlayerId ? ' active' : '')
+      + (p.is_current ? ' current-turn' : '');
+    btn.textContent = p.name;
+    btn.addEventListener('click', () => {
+      viewingPlayerId = p.player_id;
+      updatePlayerTabs(state);
+      updatePlayerStats(state);
+      updateMovementSection(state);
+      renderPlayerSheet(state);
+    });
+    tabs.appendChild(btn);
+  }
+}
+// ================================================================ TOKEN IMAGES
+function tokenBadges(tokens) {
+  if (!tokens) return '';
+  const img = tokens > 0 ? '+1 Token.png' : '-1 Token.png';
+  const count = Math.abs(tokens);
+  let html = '';
+  for (let i = 0; i < Math.min(count, 6); i++) {
+    html += `<img class="str-token" src="/images/Assorted UI Images/${img}" title="${tokens > 0 ? '+' : ''}${tokens} Str" alt="">`;
+  }
+  if (count > 6) html += `<span class="token-overflow">x${count}</span>`;
+  return html;
+}
+function renderItemRow(item) {
+  const badges = tokenBadges(item.tokens);
+  const img = item.card_image ? ` data-card-image="/images/${item.card_image}"` : '';
+  return `<div class="stat-item has-card-preview"${img}>${item.name}${badges ? ' ' + badges : ''}</div>`;
+}
+function renderPackItemRow(item, packIndex, canEquip) {
+  const badges = tokenBadges(item.tokens);
+  const img = item.card_image ? ` data-card-image="/images/${item.card_image}"` : '';
+  const equipBtn = canEquip ? ` <button class="btn-tiny btn-equip-pack" onclick="equipFromPack(${packIndex})">Equip</button>` : '';
+  return `<div class="stat-item has-card-preview"${img}>${item.name}${badges ? ' ' + badges : ''}${equipBtn}</div>`;
+}
+function renderTraitRow(t) {
+  const badges = tokenBadges(t.tokens);
+  const desc = t.description ? ` data-tc-desc="${t.description.replace(/"/g, '&quot;')}"` : '';
+  return `<div class="stat-item trait-item tc-hoverable" data-tc-name="${t.name}"${desc}>${t.name}${badges ? ' ' + badges : ''}</div>`;
+}
+function renderCurseRow(c) {
+  const badges = tokenBadges(c.tokens);
+  const desc = c.description ? ` data-tc-desc="${c.description.replace(/"/g, '&quot;')}"` : '';
+  return `<div class="stat-item curse-item tc-hoverable" data-tc-name="${c.name}"${desc}>${c.name}${badges ? ' ' + badges : ''}</div>`;
+}
+// ================================================================ PLAYER STATS
+function updatePlayerStats(state) {
+  const p = state.players.find(x => x.player_id === viewingPlayerId) || state.players[0];
+  if (!p) return;
+  const sections = [];
+  const equip = [
+    ...p.helmets.map(i    => renderItemRow(i)),
+    ...p.chest_armor.map(i => renderItemRow(i)),
+    ...p.leg_armor.map(i  => renderItemRow(i)),
+    ...p.weapons.map(i    => renderItemRow(i)),
+  ];
+  if (equip.length) sections.push(statGroup('Equipped', equip.join('')));
+  const isCurrentViewing = p.player_id === state.current_player_id && state.game_status === 'IN_PROGRESS' && !state.has_pending_offer;
+  const packRows = [
+    ...p.pack.map((item, idx)    => renderPackItemRow(item, idx, isCurrentViewing)),
+    ...p.consumables.map(c       => `<div class="stat-item has-card-preview" data-card-image="/images/${c.card_image}">🧪 ${c.name}</div>`),
+    ...p.captured_monsters.map(m => `<div class="stat-item has-card-preview" data-card-image="/images/${m.card_image}">🐾 ${m.name}</div>`),
+  ];
+  const used = p.pack.length + p.consumables.length + p.captured_monsters.length;
+  if (used > 0) sections.push(statGroup(`Pack (${used}/${p.pack_size})`, packRows.join('')));
+  if (p.traits.length) {
+    sections.push(statGroup('Traits', p.traits.map(t => renderTraitRow(t)).join(''), 'trait-title'));
+  }
+  if (p.curses.length) {
+    sections.push(statGroup('Curses', p.curses.map(c => renderCurseRow(c)).join(''), 'curse-title'));
+  }
+  const bosses = [
+    p.miniboss1_defeated ? '<span class="boss-done">MB1 done</span>' : '',
+    p.miniboss2_defeated ? '<span class="boss-done">MB2 done</span>' : '',
+  ].filter(Boolean).join(' ');
+  document.getElementById('player-stats').innerHTML = `
+    <div class="player-header">
+      <div class="player-name-str">
+        <span class="player-name">${p.name}</span>
+        <span class="player-str">STR ${p.strength}</span>
+      </div>
+      <div class="player-pos">Tile ${p.position}</div>
+      ${bosses ? `<div class="boss-status">${bosses}</div>` : ''}
+    </div>
+    <div class="stats-body">
+      ${sections.join('') || '<div class="stat-empty">No items yet.</div>'}
+    </div>`;
+  attachCardPreviews(document.getElementById('player-stats'));
+}
+function statGroup(title, rowsHtml, titleClass = '') {
+  return `<div class="stat-group">
+    <div class="stat-group-title ${titleClass}">${title}</div>
+    ${rowsHtml}
+  </div>`;
+}
+// ================================================================ EQUIP FROM PACK
+async function equipFromPack(packIndex) {
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pack_index: packIndex }),
+  });
+  const data = await resp.json();
+  if (data.error) {
+    if (data.error.includes('no free slot') && gameState) {
+      const p = gameState.players.find(pl => pl.is_current);
+      const item = p && p.pack[packIndex];
+      if (item) {
+        const slotMap = { helmet: p.helmets, chest: p.chest_armor, legs: p.leg_armor, weapon: p.weapons };
+        const equipped = slotMap[item.slot] || [];
+        const existingName = equipped[0]?.name || 'existing item';
+        if (!confirm(`Replace "${existingName}" with "${item.name}"?\n(The replaced item will be discarded.)`)) return;
+        const resp2 = await fetch('/api/equip_from_pack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pack_index: packIndex, force: true }),
+        });
+        const data2 = await resp2.json();
+        if (data2.error) { alert(data2.error); return; }
+        applyState(data2.state);
+        return;
+      }
+    }
+    alert(data.error);
+    return;
+  }
+  applyState(data.state);
+}
+
+// ================================================================ ABILITIES
+let _availableAbilities = [];
+async function loadAndRenderAbilities() {
+  if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
+  const resp = await fetch('/api/get_abilities');
+  const data = await resp.json();
+  _availableAbilities = data.abilities || [];
+  abilityChoices = {};
+  renderAbilityPanel();
+}
+function renderAbilityPanel() {
+  const section = document.getElementById('abilities-section');
+  const isCurrentViewing = gameState && viewingPlayerId === gameState.current_player_id;
+  if (!_availableAbilities.length || !isCurrentViewing) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  const container = document.getElementById('abilities-list');
+  container.innerHTML = '';
+  for (const ab of _availableAbilities) {
+    const timing = ab.timing === 'post_card' ? ' <span class="ability-timing">(auto after card)</span>' : '';
+    const row = document.createElement('div');
+    row.className = 'ability-row';
+    const buildCheckRow = (inputExtra) => `
+      <label class="ability-toggle">
+        <input type="checkbox" class="ability-chk" data-id="${ab.id}" onchange="onAbilityCheck(this)">
+        <span class="ability-label">${ab.label}${timing}</span>
+      </label>
+      <div class="ability-desc">${ab.description}</div>
+      ${inputExtra}`;
+    if (ab.type === 'toggle') {
+      row.innerHTML = buildCheckRow('');
+    } else if (ab.type === 'select_trait') {
+      const opts = ab.traits.map((t, i) => `<option value="${i}">${t}</option>`).join('');
+      row.innerHTML = buildCheckRow(`<select class="ability-select" data-id="${ab.id}" data-field="trait_index" onchange="onAbilitySelectField(this)">${opts}</select>`);
+    } else if (ab.type === 'select_equip') {
+      const opts = ab.equips.map((e, i) => `<option value="${i}">${e}</option>`).join('');
+      row.innerHTML = buildCheckRow(`<select class="ability-select" data-id="${ab.id}" data-field="equip_index" onchange="onAbilitySelectField(this)">${opts}</select>`);
+    } else if (ab.type === 'select_number') {
+      const opts = ab.options.map(n => `<option value="${n}">Reduce by ${n}</option>`).join('');
+      row.innerHTML = buildCheckRow(`<select class="ability-select" data-id="${ab.id}" data-field="reduction" data-int="1" onchange="onAbilitySelectField(this)">${opts}</select>`);
+    } else if (ab.type === 'select_player_minion') {
+      const opts = ab.targets.map(t => `<option value="${t.player_id}">${t.name}</option>`).join('');
+      row.innerHTML = buildCheckRow(`<select class="ability-select" data-id="${ab.id}" data-field="target_player_id" onchange="onAbilitySelectField(this)">${opts}</select>`);
+    }
+    container.appendChild(row);
+  }
+}
+function onAbilityCheck(el) {
+  const id = el.dataset.id;
+  const ab = _availableAbilities.find(a => a.id === id);
+  if (!el.checked) { delete abilityChoices[id]; return; }
+  if (ab && ab.type === 'toggle') {
+    abilityChoices[id] = true;
+  } else {
+    // Initialise with current select value
+    abilityChoices[id] = abilityChoices[id] || {};
+    const sel = document.querySelector(`.ability-select[data-id="${id}"]`);
+    if (sel) {
+      const field = sel.dataset.field;
+      const val = sel.dataset.int ? parseInt(sel.value) : sel.value;
+      abilityChoices[id][field] = val;
+    }
+  }
+}
+function onAbilitySelectField(el) {
+  const id    = el.dataset.id;
+  const field = el.dataset.field;
+  const val   = el.dataset.int ? parseInt(el.value) : el.value;
+  if (abilityChoices[id] && typeof abilityChoices[id] === 'object') {
+    abilityChoices[id][field] = val;
+  }
+}
+// ================================================================ MOVEMENT SECTION
+function updateMovementSection(state) {
+  updateMovementHand(state);
+  renderAbilityPanel();
+}
+function updateMovementHand(state) {
+  const handDiv = document.getElementById('movement-hand');
+  handDiv.innerHTML = '';
+  const currentPlayer = state.players.find(p => p.is_current);
+  const viewingCurrent = viewingPlayerId === state.current_player_id;
+  const fleeLbl = document.getElementById('flee-label');
+  if (viewingCurrent && currentPlayer && currentPlayer.hero_id === 'BILLFOLD') {
+    fleeLbl.classList.remove('hidden');
+  } else {
+    fleeLbl.classList.add('hidden');
+    const tog = document.getElementById('flee-toggle');
+    if (tog) tog.checked = false;
+  }
+  if (state.game_status !== 'IN_PROGRESS' || state.has_pending_offer) {
+    handDiv.innerHTML = '<div class="hand-empty">Resolve the encounter first.</div>';
+    return;
+  }
+  if (!viewingCurrent) {
+    const name = currentPlayer ? currentPlayer.name : '?';
+    handDiv.innerHTML = `<div class="hand-empty">It\'s ${name}\'s turn.</div>`;
+    return;
+  }
+  const hand = currentPlayer ? currentPlayer.movement_hand : [];
+  if (!hand.length) {
+    handDiv.innerHTML = '<div class="hand-empty">No cards in hand.</div>';
+    return;
+  }
+  hand.forEach((val, idx) => {
+    const card = document.createElement('div');
+    card.className = 'mv-card';
+    card.title = `Move ${val} tile${val !== 1 ? 's' : ''} forward or backward`;
+    card.innerHTML = `<div class="mv-card-number">${val}</div><div class="mv-card-label">MOVE</div>`;
+    card.addEventListener('click', () => promptDirection(idx, val));
+    handDiv.appendChild(card);
+  });
+}
+// ================================================================ LOG
+function updateLog(log) {
+  const logDiv = document.getElementById('turn-log');
+  logDiv.innerHTML = '';
+  if (!log || !log.length) return;
+  for (const line of log) {
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    if (line.startsWith('['))                      div.classList.add('log-header');
+    else if (/win|defeat|victory|\uD83C\uDF89/i.test(line)) div.classList.add('log-win');
+    else if (/lose|Curse|curse/i.test(line))       div.classList.add('log-lose');
+    else if (line.startsWith('  '))                div.classList.add('log-indent');
+    div.textContent = line;
+    logDiv.appendChild(div);
+  }
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+// ================================================================ INTERACTIVE TURN FLOW
+let _pendingCardIndex = null;
+
+function promptDirection(cardIndex, cardValue) {
+  if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
+  const p = gameState.players.find(x => x.is_current);
+  if (!p) return;
+  const fwdTile = Math.min(p.position + cardValue, 90);
+  const bwdTile = Math.max(p.position - cardValue, 1);
+  _pendingCardIndex = cardIndex;
+  document.getElementById('direction-desc').textContent =
+    `Card ${cardValue}: Forward to tile ${fwdTile} or Backward to tile ${bwdTile}?`;
+  document.getElementById('direction-modal').classList.remove('hidden');
+}
+
+function confirmDirection(dir) {
+  document.getElementById('direction-modal').classList.add('hidden');
+  if (_pendingCardIndex === null) return;
+  beginMove(_pendingCardIndex, dir);
+  _pendingCardIndex = null;
+}
+
+function cancelDirection() {
+  document.getElementById('direction-modal').classList.add('hidden');
+  _pendingCardIndex = null;
+}
+
+async function beginMove(cardIndex, direction = 'forward') {
+  if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
+  const flee = document.getElementById('flee-toggle')?.checked || false;
+  const activated = Object.assign({}, abilityChoices);
+  const resp = await fetch('/api/begin_move', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ card_index: cardIndex, flee, activated, direction }),
+  });
+  const data = await resp.json();
+  if (data.state) viewingPlayerId = data.state.current_player_id;
+  applyState(data.state);
+  if (data.phase === 'combat') {
+    playMusic('Battle Music.wav');
+    showPreFightScene(data.combat_info, data.state);
+    return;
+  }
+  if (data.combat_info) {
+    playMusic('Battle Music.wav');
+    showBattleScene(data.combat_info, data.state);
+    return;
+  }
+  if (data.phase === 'charlie_work') {
+    _showCharlieWorkDecision(data.level);
+    return;
+  }
+  const ts = data.tile_scene || {};
+  if (data.phase === 'done') {
+    _resumeTierMusic(data.state);
+    if (ts.tile_type === 'BLANK') {
+      showTileScene(ts, () => loadAndRenderAbilities());
+    } else {
+      await loadAndRenderAbilities();
+    }
+  } else if (data.phase === 'offer_chest') {
+    _pendingOfferData = data.offer;
+    showChestModal(data.offer, ts);
+  } else if (data.phase === 'offer_shop') {
+    _pendingOfferData = data.offer;
+    showShopModal(data.offer, data.state, ts);
+  }
+}
+// ================================================================ CHEST MODAL
+let _pendingOfferData = null;
+function _setOfferBackground(tileScene) {
+  const modal = document.getElementById('offer-modal');
+  if (tileScene && tileScene.background) {
+    modal.style.background = `linear-gradient(rgba(0,0,0,0.78), rgba(0,0,0,0.78)), url('/images/${tileScene.background}') center/cover`;
+  } else {
+    modal.style.background = '';
+  }
+}
+function showChestModal(offer, tileScene) {
+  playMusic('Chest Music.wav');
+  const modal = document.getElementById('offer-modal');
+  const body  = document.getElementById('offer-modal-body');
+  const item  = offer.items[0];
+  _setOfferBackground(tileScene);
+  body.innerHTML = `
+    <h2 class="offer-title">Gift Chest</h2>
+    <div class="offer-items">${renderOfferItemCard(item, 0, true)}</div>
+    <div class="offer-actions">
+      <button class="btn-primary" onclick="confirmChestTake()">Take It</button>
+      <button class="btn-secondary" onclick="resolveOffer({take: false})">Leave It</button>
+    </div>`;
+  modal.classList.remove('hidden');
+}
+function confirmChestTake() {
+  document.getElementById('offer-modal').classList.add('hidden');
+  const item = _pendingOfferData.items[0];
+  showInventoryPopup(item, (placement) => {
+    if (placement.discard) { resolveOffer({ take: false }); }
+    else { resolveOffer({ take: true, ...placement }); }
+  });
+}
+let _shopSelectedIndex = 0;
+function showShopModal(offer, state, tileScene) {
+  playMusic('Shop Music.wav');
+  _shopSelectedIndex = -1;
+  const modal = document.getElementById('offer-modal');
+  const body  = document.getElementById('offer-modal-body');
+  _setOfferBackground(tileScene);
+  body.innerHTML = `
+    <h2 class="offer-title">Shop</h2>
+    <p class="offer-sub">Choose one item to take — it's free!</p>
+    <div class="offer-items shop-row">
+      ${offer.items.map((it, i) => renderOfferItemCard(it, i, false)).join('')}
+    </div>
+    <div class="offer-actions">
+      <button class="btn-primary" id="shop-confirm-btn" onclick="confirmShopTake()" disabled>
+        Take It
+      </button>
+      <button class="btn-secondary" onclick="resolveOffer({take: false})">Leave Shop</button>
+    </div>`;
+  body.querySelectorAll('.offer-item-card').forEach(card => {
+    card.addEventListener('click', () => {
+      body.querySelectorAll('.offer-item-card').forEach(c => c.classList.remove('selected'));
+      card.classList.add('selected');
+      _shopSelectedIndex = parseInt(card.dataset.index);
+      document.getElementById('shop-confirm-btn').disabled = false;
+    });
+  });
+  modal.classList.remove('hidden');
+}
+function confirmShopTake() {
+  if (_shopSelectedIndex < 0) return;
+  const modal = document.getElementById('offer-modal');
+  modal.classList.add('hidden');
+  modal.style.background = '';
+  const item = _pendingOfferData.items[_shopSelectedIndex];
+  showInventoryPopup(item, (placement) => {
+    if (placement.discard) { resolveOffer({ take: false, chosen_index: _shopSelectedIndex }); }
+    else { resolveOffer({ chosen_index: _shopSelectedIndex, ...placement }); }
+  });
+}
+function renderOfferItemCard(item, index, autoSelected) {
+  const strSign = item.strength_bonus >= 0 ? '+' : '';
+  const strText = `${strSign}${item.strength_bonus} Str`;
+  const imgHtml = item.card_image
+    ? `<img class="offer-item-img" src="/images/${item.card_image}" alt="${item.name}" onclick="event.stopPropagation();zoomCard(this.src)">`
+    : '';
+  return `
+    <div class="offer-item-card ${autoSelected ? 'selected' : ''}" data-index="${index}">
+      ${imgHtml}
+      <div class="offer-item-slot">${item.slot}</div>
+      <div class="offer-item-name">${item.name}</div>
+      <div class="offer-item-str">${strText}</div>
+      ${item.tokens ? `<div class="offer-item-tokens">${tokenBadges(item.tokens)}</div>` : ''}
+    </div>`;
+}
+// ================================================================ INVENTORY POPUP (player-sheet placement mode)
+let _invState  = {};
+let _invOnConfirm = null;
+let _invPlacementItem = null;  // item currently being placed
+
+function showInventoryPopup(item, onConfirm) {
+  _invState          = {};
+  _invOnConfirm      = onConfirm;
+  _invPlacementItem  = item;
+  // Open the player sheet in placement mode
+  _playerSheetOpen   = true;
+  if (gameState) renderPlayerSheetFull(gameState);
+  document.getElementById('player-sheet-overlay').classList.remove('hidden');
+}
+
+function _finishPlacement(choices) {
+  _invPlacementItem = null;
+  _playerSheetOpen  = false;
+  document.getElementById('player-sheet-overlay').classList.add('hidden');
+  const cb = _invOnConfirm;
+  _invOnConfirm = null;
+  if (cb) cb(choices);
+}
+
+// Called when the player clicks an equip slot during placement mode.
+function _psPlaceEquip() {
+  _finishPlacement({ placement: 'equip' });
+}
+
+// Called when clicking on an occupied equip slot — show options modal.
+function _psPlaceEquipDiscard(slotKey, idx) {
+  const p = gameState.players.find(pl => pl.is_current);
+  const slotDataMap = { equip_helmet: p.helmets, equip_chest: p.chest_armor, equip_leg: p.leg_armor, equip_weapon: p.weapons };
+  const existing = (slotDataMap[slotKey] || [])[idx];
+  const name = existing ? existing.name : 'the current item';
+  _showOccupiedSlotModal(name, slotKey, idx);
+}
+
+// Called when clicking a pack slot during placement mode.
+function _psPlacePack(existingIdx) {
+  if (existingIdx >= 0) {
+    const p = gameState.players.find(pl => pl.is_current);
+    const allPack = [
+      ...(p.pack || []),
+      ...(p.consumables || []),
+      ...(p.captured_monsters || []),
+    ];
+    const name = allPack[existingIdx]?.name || 'item in slot';
+    if (!confirm(`Discard ${name}?`)) return;
+    _finishPlacement({ placement: 'pack', pack_discard_index: existingIdx });
+  } else {
+    _finishPlacement({ placement: 'pack', pack_discard_index: -1 });
+  }
+}
+
+// Discard the offered item and close placement mode.
+function _psDiscardPlacement() {
+  const cb = _invOnConfirm;
+  _invPlacementItem = null;
+  _playerSheetOpen  = false;
+  _invOnConfirm     = null;
+  document.getElementById('player-sheet-overlay').classList.add('hidden');
+  if (cb) cb({ discard: true });
+}
+
+// Go back to the offer modal without discarding the pending item.
+function _psBackToOffer() {
+  _invPlacementItem = null;
+  _playerSheetOpen  = false;
+  _invOnConfirm     = null;
+  document.getElementById('player-sheet-overlay').classList.add('hidden');
+  document.getElementById('offer-modal').classList.remove('hidden');
+}
+
+// ---- Context menu ----
+const _ctxMenu = (() => {
+  const el = document.createElement('div');
+  el.id = 'card-context-menu';
+  el.className = 'hidden';
+  document.body.appendChild(el);
+  return el;
+})();
+
+function _showCtxMenu(x, y, entries) {
+  _ctxMenu.innerHTML = entries.map(e =>
+    `<div class="ctx-menu-item${e.danger ? ' ctx-danger' : ''}" onclick="${e.action}">${e.label}</div>`
+  ).join('');
+  const margin = 8;
+  _ctxMenu.classList.remove('hidden');
+  const w = _ctxMenu.offsetWidth || 160;
+  const h = _ctxMenu.offsetHeight || 100;
+  _ctxMenu.style.left = Math.min(x, window.innerWidth - w - margin) + 'px';
+  _ctxMenu.style.top  = Math.min(y, window.innerHeight - h - margin) + 'px';
+}
+
+function _closeCtxMenu() { _ctxMenu.classList.add('hidden'); }
+
+document.addEventListener('click', () => _closeCtxMenu(), true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') _closeCtxMenu(); });
+
+function _attachCtxMenus(container) {
+  container.querySelectorAll('[data-ctx="equip"]').forEach(el => {
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      const slotKey  = el.dataset.slotKey;
+      const slotIdx  = el.dataset.slotIdx;
+      const name     = el.dataset.itemName || 'item';
+      const imgSrc   = el.dataset.itemImage;
+      const entries = [];
+      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
+      entries.push({ label: 'Move to Pack', action: `manageItem('to_pack','${slotKey}',${slotIdx});_closeCtxMenu()` });
+      entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','${slotKey}',${slotIdx})}_closeCtxMenu()`, danger: true });
+      _showCtxMenu(e.clientX, e.clientY, entries);
+    });
+  });
+  container.querySelectorAll('[data-ctx="captured_monster"]').forEach(el => {
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      const idx     = el.dataset.capturedIdx;
+      const name    = el.dataset.itemName || 'monster';
+      const imgSrc  = el.dataset.itemImage;
+      const devImg  = el.dataset.deviceImage;
+      const entries = [];
+      if (imgSrc) entries.push({ label: 'View Monster Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
+      if (devImg) entries.push({ label: 'View Capture Device Card', action: `zoomCard('${devImg}');_closeCtxMenu()` });
+      entries.push({ label: `Summon ${name}`, action: `summonCapturedMonster(${idx});_closeCtxMenu()` });
+      entries.push({ label: `Release ${name}`, action: `releaseCapturedMonster(${idx});_closeCtxMenu()`, danger: true });
+      _showCtxMenu(e.clientX, e.clientY, entries);
+    });
+  });
+  container.querySelectorAll('[data-ctx="pack"]').forEach(el => {
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      const packIdx = el.dataset.packIdx;
+      const name    = el.dataset.itemName || 'item';
+      const imgSrc  = el.dataset.itemImage;
+      const isConsumable = el.dataset.isConsumable === 'true';
+      const entries = [];
+      if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${imgSrc}');_closeCtxMenu()` });
+      if (!isConsumable) entries.push({ label: 'Equip', action: `manageItem('to_equip','pack',${packIdx});_closeCtxMenu()` });
+      entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','pack',${packIdx})}_closeCtxMenu()`, danger: true });
+      _showCtxMenu(e.clientX, e.clientY, entries);
+    });
+  });
+}
+
+async function manageItem(action, source, idx) {
+  const resp = await fetch('/api/manage_item', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, source, index: idx }),
+  });
+  const data = await resp.json();
+  if (data.ok && data.state) {
+    gameState = data.state;
+    renderPlayerSheetFull(gameState);
+  } else if (data.error) {
+    alert(data.error);
+  }
+}
+
+async function releaseCapturedMonster(idx) {
+  const resp = await fetch('/api/release_monster', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ index: idx }),
+  });
+  const data = await resp.json();
+  if (data.ok && data.state) {
+    gameState = data.state;
+    renderPlayerSheetFull(gameState);
+  } else if (data.error) {
+    alert(data.error);
+  }
+}
+
+async function summonCapturedMonster(idx) {
+  if (!confirm('Summon this monster as a permanent minion? This cannot be undone.')) return;
+  const resp = await fetch('/api/summon_monster', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ index: idx }),
+  });
+  const data = await resp.json();
+  if (data.ok && data.state) {
+    gameState = data.state;
+    renderPlayerSheetFull(gameState);
+  } else if (data.error) {
+    alert(data.error);
+  }
+}
+
+function invSelectPlace(type, packIdx) {
+  _invState = { type, packIdx: packIdx ?? -1 };
+  document.querySelectorAll('.inv-slot').forEach(el => el.classList.remove('inv-selected'));
+  if (type === 'equip') {
+    document.getElementById('inv-equip-slot')?.classList.add('inv-selected');
+  } else if ((packIdx ?? -1) >= 0) {
+    document.querySelectorAll(`.inv-pack-slot[data-pack-idx="${packIdx}"]`)
+      .forEach(el => el.classList.add('inv-selected'));
+  } else {
+    document.getElementById('inv-pack-free')?.classList.add('inv-selected');
+  }
+  document.getElementById('inv-confirm-btn').disabled = false;
+}
+function invEquipSwap(equipIdx) {
+  _invState = { type: 'equip', equipAction: 'swap', equipItemIdx: equipIdx };
+  document.querySelectorAll('.inv-slot').forEach(el => el.classList.remove('inv-selected'));
+  document.querySelectorAll(`.inv-equipped[data-equip-idx="${equipIdx}"]`)
+    .forEach(el => el.classList.add('inv-selected'));
+  document.getElementById('inv-equip-slot')?.classList.add('inv-selected');
+  document.getElementById('inv-confirm-btn').disabled = false;
+}
+function invEquipDiscard(equipIdx) {
+  _invState = { type: 'equip', equipAction: 'discard', equipItemIdx: equipIdx };
+  document.querySelectorAll('.inv-slot').forEach(el => el.classList.remove('inv-selected'));
+  document.querySelectorAll(`.inv-equipped[data-equip-idx="${equipIdx}"]`)
+    .forEach(el => el.classList.add('inv-selected'));
+  document.getElementById('inv-equip-slot')?.classList.add('inv-selected');
+  document.getElementById('inv-confirm-btn').disabled = false;
+}
+function invConfirm() {
+  document.getElementById('inventory-modal').classList.add('hidden');
+  const choices = { placement: _invState.type === 'equip' ? 'equip' : 'pack' };
+  if (_invState.equipAction)  choices.equip_action     = _invState.equipAction;
+  if (_invState.equipItemIdx !== undefined) choices.equip_item_index = _invState.equipItemIdx;
+  if (_invState.packIdx !== undefined && _invState.packIdx >= 0)
+    choices.pack_discard_index = _invState.packIdx;
+  if (_invOnConfirm) _invOnConfirm(choices);
+}
+function invCancel() {
+  document.getElementById('inventory-modal').classList.add('hidden');
+  // Discard the item — resolve with placement=discard (server treats as pack full discard)
+  if (_invOnConfirm) _invOnConfirm({ placement: 'pack', pack_discard_index: -999 });
+}
+// ================================================================ RESOLVE OFFER
+async function resolveOffer(choices) {
+  const modal = document.getElementById('offer-modal');
+  modal.style.background = '';
+  modal.classList.add('hidden');
+  document.getElementById('inventory-modal').classList.add('hidden');
+  const resp = await fetch('/api/resolve_offer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(choices),
+  });
+  const data = await resp.json();
+  viewingPlayerId = data.state.current_player_id;
+  applyState(data.state);
+  _resumeTierMusic(data.state);
+  await loadAndRenderAbilities();
+}
+// ================================================================ APPLY STATE
+function applyState(state) {
+  gameState = state;
+  document.getElementById('turn-number').textContent = `Turn ${state.turn_number}`;
+  const cur = state.players.find(p => p.is_current);
+  document.getElementById('active-player-name').textContent = cur ? `${cur.name}'s Turn` : '';
+  // Update main hero card display
+  const mainHeroCard = document.getElementById('main-hero-card');
+  if (mainHeroCard) {
+    if (cur && cur.hero_card_image) {
+      mainHeroCard.innerHTML = `<img src="/images/${cur.hero_card_image}" alt="${cur.name}" onclick="zoomCard(this.src)" title="${cur.name} — click to zoom">`;
+    } else {
+      mainHeroCard.innerHTML = '';
+    }
+  }
+  updateBoard(state);
+  updatePlayerTabs(state);
+  updatePlayerStats(state);
+  updateMovementSection(state);
+  updateLog(state.log);
+  renderPlayerSheet(state);
+  if (state.game_status === 'WON' && state.winner !== null) {
+    const winner = state.players.find(p => p.player_id === state.winner);
+    document.getElementById('winner-text').textContent =
+      `${winner ? winner.name : 'A player'} has defeated The Werbler!`;
+    document.getElementById('winner-modal').classList.remove('hidden');
+  }
+}
+// ================================================================ CARD PREVIEW TOOLTIP
+let _previewEl = null;
+function _getPreviewEl() {
+  if (!_previewEl) {
+    _previewEl = document.createElement('div');
+    _previewEl.id = 'card-preview-tooltip';
+    _previewEl.className = 'hidden';
+    document.body.appendChild(_previewEl);
+  }
+  return _previewEl;
+}
+function attachCardPreviews(container) {
+  container.querySelectorAll('.has-card-preview').forEach(el => {
+    const src = el.dataset.cardImage;
+    if (!src) return;
+    el.addEventListener('mouseenter', (e) => {
+      const tip = _getPreviewEl();
+      tip.innerHTML = `<img src="${src}" alt="Card preview">`;
+      tip.classList.remove('hidden');
+      _positionPreview(e);
+    });
+    el.addEventListener('mousemove', _positionPreview);
+    el.addEventListener('mouseleave', () => _getPreviewEl().classList.add('hidden'));
+  });
+}
+function _positionPreview(e) {
+  const tip = _getPreviewEl();
+  const tipW = tip.offsetWidth || 340;
+  const tipH = tip.offsetHeight || 490;
+  const margin = 16;
+  let x, y;
+  if (e.clientX > window.innerWidth / 2) {
+    // Right side of screen → preview appears to the LEFT of cursor
+    x = e.clientX - tipW - margin;
+  } else {
+    // Left side of screen → preview appears to the RIGHT of cursor
+    x = e.clientX + margin;
+  }
+  x = Math.max(8, Math.min(x, window.innerWidth - tipW - 8));
+  y = Math.max(8, Math.min(e.clientY - 10, window.innerHeight - tipH - 8));
+  tip.style.left = x + 'px';
+  tip.style.top  = y + 'px';
+}
+// ================================================================ BATTLE SCENE
+function showTileScene(tileScene, onContinue) {
+  const overlay = document.getElementById('battle-overlay');
+  const bg = tileScene.background ? `/images/${tileScene.background}` : '';
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div class="battle-content">
+      <div class="battle-title">TILE ${tileScene.moved_to || ''}</div>
+      <div class="battle-result" style="font-size:22px;color:var(--text-dim);letter-spacing:1px;">Nothing here&hellip;</div>
+      <div class="battle-actions">
+        <button class="btn-primary" onclick="closeTileScene()">Continue</button>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  _tileSceneCallback = onContinue;
+}
+let _tileSceneCallback = null;
+async function closeTileScene() {
+  document.getElementById('battle-overlay').classList.add('hidden');
+  if (_tileSceneCallback) { const cb = _tileSceneCallback; _tileSceneCallback = null; await cb(); }
+}
+function zoomCard(src) {
+  const modal = document.getElementById('card-zoom-modal');
+  modal.querySelector('img').src = src;
+  modal.classList.remove('hidden');
+}
+// ================================================================ PRE-FIGHT SCENE
+let _preFightCombat = null;
+
+function showPreFightScene(combat, state) {
+  _preFightCombat = combat;
+  _renderPreFightScene(combat, state);
+}
+
+function _renderPreFightScene(combat, state) {
+  const overlay = document.getElementById('battle-overlay');
+  const p = state.players.find(x => x.player_id === combat.player_id) || state.players[0];
+  const heroImg = combat.hero_card_image ? `/images/${combat.hero_card_image}` : (p && p.hero_card_image ? `/images/${p.hero_card_image}` : '');
+  const playerName = combat.player_name || (p ? p.name : '');
+  const monsterImg = combat.card_image ? `/images/${combat.card_image}` : '';
+  const bg = combat.background ? `/images/${combat.background}` : '';
+  const consumables = p ? (p.consumables || []) : [];
+  const effectiveStr = combat.player_strength;
+
+  let consumableHtml = '';
+  if (consumables.length === 0) {
+    consumableHtml = '<div class="prefight-no-consumables">No consumables available</div>';
+  } else {
+    consumableHtml = consumables.map((c, i) => {
+      let bonusText = '';
+      if (c.strength_bonus > 0) bonusText = `+${c.strength_bonus} STR`;
+      else if (c.effect_id === 'monster_str_mod') bonusText = `Weakens monster STR`;
+      else if (c.effect_id === 'capture_monster') bonusText = `Captures Monster (Tier ${c.effect_tier || '?'})`;
+      else if (c.effect_id) bonusText = 'Special Effect';
+      return `<div class="prefight-consumable">
+        ${c.card_image ? `<img class="prefight-consumable-img" src="/images/${c.card_image}" alt="${c.name}" onclick="zoomCard('/images/${c.card_image}')">` : ''}
+        <div class="prefight-consumable-info">
+          <div class="prefight-consumable-name">${c.name}</div>
+          ${bonusText ? `<div class="prefight-consumable-bonus">${bonusText}</div>` : ''}
+        </div>
+        <button class="btn-use-consumable" onclick="useConsumable(${i})">Use</button>
+      </div>`;
+    }).join('');
+  }
+
+  const gearPanelHtml = _buildBattleGearSection(combat);
+  const strTitle = _strBreakdownTitle(combat);
+
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div class="battle-content">
+      ${gearPanelHtml ? `<div class="battle-left-panel">${gearPanelHtml}</div>` : ''}
+      <div class="battle-main">
+        <div class="battle-title">${combat.category === 'werbler' ? 'THE WERBLER' : combat.category === 'miniboss' ? 'MINIBOSS ENCOUNTER' : 'MONSTER ENCOUNTER'}</div>
+        ${combat.description ? `<div class="battle-boss-desc">${combat.description}</div>` : ''}
+        <div class="battle-arena">
+          <div class="battle-side">
+            ${heroImg ? `<img class="battle-card-img" src="${heroImg}" alt="${playerName}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
+            <div class="battle-name">${playerName}</div>
+            <div class="battle-str" id="prefight-player-str" title="${strTitle}" style="cursor:help">STR ${effectiveStr}</div>
+          </div>
+          <div class="battle-vs">VS</div>
+          <div class="battle-side">
+            ${monsterImg ? `<img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
+            <div class="battle-name">${combat.monster_name}</div>
+            <div class="battle-str">STR ${combat.monster_strength}</div>
+          </div>
+        </div>
+        <div class="prefight-consumables-section">
+          <div class="prefight-consumables-title">Consumables</div>
+          <div class="prefight-consumables-list" id="prefight-consumables-list">
+            ${consumableHtml}
+          </div>
+        </div>
+        ${combat.ill_come_in_again_available ? `<div class="ill-come-in-again-section">
+          <button class="btn-secondary" onclick="useIllComeInAgain()" title="Send this monster back and draw a new one (once per encounter)">
+            &#x21BA; I'll Come In Again!
+          </button>
+        </div>` : ''}
+        <div class="battle-actions">
+          <button class="btn-primary btn-fight" onclick="doFight()">&#x2694; Fight!</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  attachCardPreviews(overlay);
+}
+
+async function useIllComeInAgain() {
+  const resp = await fetch('/api/use_ill_come_in_again', { method: 'POST' });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) gameState = data.state;
+  if (data.phase === 'combat' && data.combat_info) {
+    _preFightCombat = data.combat_info;
+    _renderPreFightScene(data.combat_info, gameState);
+  }
+}
+
+async function useConsumable(idx) {
+  const resp = await fetch('/api/use_consumable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ consumable_index: idx }),
+  });
+  const data = await resp.json();
+  if (!data.ok) {
+    alert(data.error || 'Failed to use consumable');
+    return;
+  }
+  if (data.phase === 'captured') {
+    document.getElementById('battle-overlay').classList.add('hidden');
+    gameState = data.state;
+    viewingPlayerId = gameState.current_player_id;
+    applyState(gameState);
+    _resumeTierMusic();
+    await loadAndRenderAbilities();
+    return;
+  }
+  if (data.state) {
+    gameState = data.state;
+    _preFightCombat = data.combat_info;
+    _renderPreFightScene(data.combat_info, data.state);
+  }
+}
+
+async function doFight() {
+  const resp = await fetch('/api/fight', { method: 'POST' });
+  const data = await resp.json();
+  if (data.state) gameState = data.state;
+  if (data.combat_info) {
+    showBattleScene(data.combat_info, data.state);
+  } else {
+    document.getElementById('battle-overlay').classList.add('hidden');
+    if (gameState) {
+      viewingPlayerId = gameState.current_player_id;
+      applyState(gameState);
+      _resumeTierMusic();
+      await loadAndRenderAbilities();
+    }
+  }
+}
+// ================================================================ BATTLE SCENE
+let _lastCombatResult = null;
+function showBattleScene(combat, state) {
+  _lastCombatResult = combat;
+  const overlay = document.getElementById('battle-overlay');
+  const p = state.players.find(x => x.player_id === combat.player_id) || state.players.find(x => x.is_current) || state.players[0];
+  const heroImg = combat.hero_card_image ? `/images/${combat.hero_card_image}` : (p && p.hero_card_image ? `/images/${p.hero_card_image}` : '');
+  const playerName = combat.player_name || (p ? p.name : '');
+  const monsterImg = combat.card_image ? `/images/${combat.card_image}` : '';
+  const bg = combat.background ? `/images/${combat.background}` : '';
+  const resultText = combat.result === 'WIN' ? 'VICTORY!'
+    : combat.result === 'LOSE' ? 'DEFEAT'
+    : combat.result === 'TIE' ? 'TIE' : '';
+  const resultClass = combat.result === 'WIN' ? 'won' : combat.result === 'LOSE' ? 'lost' : '';
+  const catLabel = combat.category === 'werbler' ? 'THE WERBLER'
+    : combat.category === 'miniboss' ? 'MINIBOSS' : 'MONSTER';
+
+  const gearPanelHtml = _buildBattleGearSection(combat);
+  const strTitle = _strBreakdownTitle(combat);
+
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div class="battle-content">
+      ${gearPanelHtml ? `<div class="battle-left-panel">${gearPanelHtml}</div>` : ''}
+      <div class="battle-main">
+        <div class="battle-title">${catLabel} ENCOUNTER</div>
+        <div class="battle-arena">
+          <div class="battle-side">
+            ${heroImg ? `<img class="battle-card-img" src="${heroImg}" alt="${playerName}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
+            <div class="battle-name">${playerName}</div>
+            <div class="battle-str" title="${strTitle}" style="cursor:help">STR ${combat.player_strength}</div>
+          </div>
+          <div class="battle-vs">VS</div>
+          <div class="battle-side">
+            ${monsterImg ? `<img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" onclick="zoomCard(this.src)" onerror="this.style.display='none'">` : ''}
+            <div class="battle-name">${combat.monster_name}</div>
+            <div class="battle-str">STR ${combat.monster_strength}</div>
+          </div>
+        </div>
+        ${resultText ? `<div class="battle-result ${resultClass}">${resultText}</div>` : ''}
+        <div class="battle-actions">
+          <button class="btn-primary" onclick="closeBattleScene()">Continue</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  attachCardPreviews(overlay);
+}
+
+async function closeBattleScene() {
+  if (_lastCombatResult && (_lastCombatResult.trait_gained || _lastCombatResult.curse_gained)) {
+    const gains = _lastCombatResult;
+    _lastCombatResult = null;
+    showGainModal(gains);
+    return;
+  }
+  await _finishBattleContinue();
+}
+
+function showGainModal(combat) {
+  let html = '';
+  if (combat.trait_gained) {
+    html += `<div class="gain-modal-item is-trait">
+      <div class="gain-modal-type">Trait Gained</div>
+      <div class="gain-modal-name">${combat.trait_gained}</div>
+      ${combat.trait_gained_desc ? `<div class="gain-modal-desc">${combat.trait_gained_desc}</div>` : ''}
+    </div>`;
+  }
+  if (combat.curse_gained) {
+    html += `<div class="gain-modal-item is-curse">
+      <div class="gain-modal-type">Curse Gained</div>
+      <div class="gain-modal-name">${combat.curse_gained}</div>
+      ${combat.curse_gained_desc ? `<div class="gain-modal-desc">${combat.curse_gained_desc}</div>` : ''}
+    </div>`;
+  }
+  document.getElementById('gain-modal-body').innerHTML = html;
+  document.getElementById('gain-modal').classList.remove('hidden');
+}
+
+async function closeGainModal() {
+  document.getElementById('gain-modal').classList.add('hidden');
+  await _finishBattleContinue();
+}
+
+async function _finishBattleContinue() {
+  document.getElementById('battle-overlay').classList.add('hidden');
+  if (gameState) {
+    viewingPlayerId = gameState.current_player_id;
+    applyState(gameState);
+    _resumeTierMusic();
+    await loadAndRenderAbilities();
+  }
+}
+// ================================================================ PLAYER SHEET
+let _playerSheetOpen = false;
+
+function openPlayerSheet() {
+  _playerSheetOpen = true;
+  if (gameState) renderPlayerSheetFull(gameState);
+  document.getElementById('player-sheet-overlay').classList.remove('hidden');
+}
+
+function closePlayerSheet() {
+  _playerSheetOpen = false;
+  document.getElementById('player-sheet-overlay').classList.add('hidden');
+}
+
+function renderPlayerSheet(state) {
+  if (_playerSheetOpen) renderPlayerSheetFull(state);
+}
+
+function renderPlayerSheetMini(p) {
+  const mini = document.getElementById('player-sheet-mini');
+  if (!mini) return;
+  const imgHtml = p.hero_card_image
+    ? `<img class="ps-mini-hero-thumb" src="/images/${p.hero_card_image}" alt="${p.name}">`
+    : '';
+  mini.innerHTML = `
+    <div class="ps-mini-content" onclick="openPlayerSheet()" title="Open player sheet">
+      ${imgHtml}
+      <div class="ps-mini-info">
+        <div class="ps-mini-name">${p.name}</div>
+        <div class="ps-mini-str">STR ${p.strength}</div>
+        <div class="ps-mini-hint">View Sheet</div>
+      </div>
+    </div>`;
+}
+
+function renderPlayerSheetFull(state) {
+  const p = state.players.find(x => x.player_id === viewingPlayerId) || state.players[0];
+  if (!p) return;
+  const overlay = document.getElementById('player-sheet-overlay');
+
+  // ---- Movement piles ----
+  const hasDiscard = p.movement_discard_top !== null && p.movement_discard_top !== undefined;
+  const deckCount = p.movement_deck_cards ? p.movement_deck_cards.length : '?';
+  const deckHtml = `
+    <div class="ps-pile-stack" onclick="openDeckViewer('deck')" title="View remaining cards" style="cursor:pointer">
+      <div class="ps-pile-card ps-pile-facedown"><img class="ps-pile-img" src="/images/Cards/Card back brown.png" alt="deck" onerror="this.style.display='none'"></div>
+      <div class="ps-pile-label">Deck (${deckCount})</div>
+    </div>
+    <div class="ps-pile-stack" onclick="openDeckViewer('discard')" title="View discard pile" style="cursor:pointer">
+      <div class="ps-pile-card ${hasDiscard ? '' : 'ps-pile-empty'}">
+        ${hasDiscard ? `<img class="ps-pile-img" src="/images/Movement/Movement Card ${p.movement_discard_top}.png" alt="${p.movement_discard_top}">` : '—'}
+      </div>
+      <div class="ps-pile-label">Discard${p.movement_discard_count ? ' (' + p.movement_discard_count + ')' : ''}</div>
+    </div>`;
+
+  // ---- Pack slots ----
+  const packItems = [
+    ...p.pack.map((i, realIdx) => ({ label: i.name, sub: (i.strength_bonus >= 0 ? '+' : '') + i.strength_bonus + ' Str', card_image: i.card_image, realPackIdx: realIdx, isConsumable: i.is_consumable || false, isCapturedMonster: false })),
+    ...(p.consumables || []).map(c => ({ label: c.name, sub: 'Consumable', card_image: c.card_image, realPackIdx: -1, isConsumable: true, isCapturedMonster: false })),
+    ...(p.captured_monsters || []).map((m, ci) => ({ label: m.name, sub: 'Captured Monster', card_image: m.card_image, realPackIdx: -1, isConsumable: false, isCapturedMonster: true, capturedMonsterIdx: ci, level: m.level || 1 })),
+  ];
+  const totalPackSlots = Math.max(p.pack_size || 3, packItems.length);
+  const inPlacement = _invPlacementItem !== null;
+  let packHtml = '';
+  for (let i = 0; i < totalPackSlots; i++) {
+    const item = packItems[i];
+    const placementClass = inPlacement ? ' ps-slot-placement-target' : '';
+    if (item && item.isCapturedMonster) {
+      // Captured monster: red border, special context menu
+      const deviceMark = item.level === 3 ? 'III' : item.level === 2 ? 'II' : 'I';
+      const deviceImg = `Items/Consumables/Consumable Finished Cards/Monster Capture Device Mark ${deviceMark} Card.png`;
+      packHtml += `<div class="ps-slot ps-slot-card ps-captured-monster${placementClass} has-card-preview" data-card-image="/images/${item.card_image}"
+        data-ctx="captured_monster" data-captured-idx="${item.capturedMonsterIdx}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="/images/${item.card_image}" data-device-image="/images/${deviceImg}"
+        style="border-color:var(--curse)">
+        <div class="ps-slot-label" style="color:var(--curse)">Captured</div>
+        <img class="ps-slot-card-img" src="/images/${item.card_image}" alt="${item.label}">
+      </div>`;
+    } else if (item && item.card_image) {
+      const previewClass = inPlacement ? '' : ' has-card-preview';
+      const previewData = inPlacement ? '' : `data-card-image="/images/${item.card_image}"`;
+      const ctxAttr = inPlacement
+        ? `onclick="_psPlacePack(${i})" title="Pack here — discard ${(item.label || '').replace(/"/g, '&quot;')}"`
+        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="/images/${item.card_image}" data-is-consumable="${item.isConsumable}"`;
+      packHtml += `<div class="ps-slot ps-slot-card${placementClass}${previewClass}" ${previewData} ${ctxAttr}>
+        <div class="ps-slot-label">Pack</div>
+        <img class="ps-slot-card-img" src="/images/${item.card_image}" alt="${item.label}">
+      </div>`;
+    } else if (item) {
+      const ctxAttr = inPlacement
+        ? `onclick="_psPlacePack(${i})" title="Pack here — discard ${(item.label || '').replace(/"/g, '&quot;')}"`
+        : `data-ctx="pack" data-pack-idx="${item.realPackIdx >= 0 ? item.realPackIdx : i}" data-item-name="${(item.label || '').replace(/"/g, '&quot;')}" data-item-image="" data-is-consumable="${item.isConsumable}"`;
+      packHtml += `<div class="ps-slot ps-slot-filled${placementClass}" ${ctxAttr}>
+        <div class="ps-slot-label">Pack</div>
+        <div class="ps-slot-divider"></div>
+        <div class="ps-slot-name">${item.label}</div>
+        <div class="ps-slot-sub">${item.sub}</div>
+      </div>`;
+    } else {
+      const clickAttr = inPlacement ? `onclick="_psPlacePack(-1)" title="Pack here"` : '';
+      packHtml += `<div class="ps-slot ps-slot-empty${placementClass}" ${clickAttr}><div class="ps-slot-label">Pack</div></div>`;
+    }
+  }
+
+  // ---- Hero card ----
+  const heroClickAttr = p.hero_card_image ? `onclick="zoomCard('/images/${p.hero_card_image}')" style="cursor:zoom-in" title="Click to zoom"` : '';
+  const heroHtml = p.hero_card_image
+    ? `<img class="ps-hero-card-img" src="/images/${p.hero_card_image}" alt="${p.name}" ${heroClickAttr}>`
+    : `<div class="ps-hero-card-placeholder">${p.name}</div>`;
+
+  // ---- Equipment grid ----
+  const equipHtml = _buildEquipGrid(p);
+
+  // ---- Traits / Curses (split into left and right columns) ----
+  let traitsHtml = '';
+  let cursesHtml = '';
+  if (p.traits && p.traits.length) {
+    const traitCards = p.traits.map(t => {
+      const badges = t.tokens ? ' ' + tokenBadges(t.tokens) : '';
+      const desc = t.description ? ` data-tc-desc="${t.description.replace(/"/g, '&quot;')}"` : '';
+      return `<div class="ps-tc-card is-trait tc-hoverable" data-tc-name="${t.name}"${desc} onclick="this.classList.toggle('ps-tc-expanded')">${t.name}${badges}</div>`;
+    }).join('');
+    traitsHtml = `<div class="ps-tc-label ps-tc-label-trait">Traits</div><div class="ps-tc-stack">${traitCards}</div>`;
+  }
+  if (p.curses && p.curses.length) {
+    const curseCards = p.curses.map(c => {
+      const badges = c.tokens ? ' ' + tokenBadges(c.tokens) : '';
+      const desc = c.description ? ` data-tc-desc="${c.description.replace(/"/g, '&quot;')}"` : '';
+      return `<div class="ps-tc-card is-curse tc-hoverable" data-tc-name="${c.name}"${desc} onclick="this.classList.toggle('ps-tc-expanded')">${c.name}${badges}</div>`;
+    }).join('');
+    cursesHtml = `<div class="ps-tc-label ps-tc-label-curse">Curses</div><div class="ps-tc-stack">${curseCards}</div>`;
+  }
+  const tcRowHtml = (traitsHtml || cursesHtml) ? `
+    <div id="ps-traits-curses-row">
+      <div id="ps-traits-col">${traitsHtml || '<div class="ps-area-label" style="color:var(--text-dim)">No Traits</div>'}</div>
+      <div id="ps-curses-col">${cursesHtml || '<div class="ps-area-label" style="color:var(--text-dim)">No Curses</div>'}</div>
+    </div>` : '';
+
+  // ---- Minion pool ----
+  const minions = p.minions || [];
+  const minionSlots = Array.from({length: 5}, (_, i) => {
+    const m = minions[i];
+    if (m && m.card_image) {
+      return `<div class="ps-minion-slot ps-minion-filled has-card-preview" data-card-image="/images/${m.card_image}">
+          <div class="ps-slot-label">Minion</div>
+          <img class="ps-slot-card-img" src="/images/${m.card_image}" alt="${m.name}" onerror="this.style.display='none'">
+        </div>`;
+    }
+    return m
+      ? `<div class="ps-minion-slot ps-minion-filled">
+          <div class="ps-slot-label">Minion</div>
+          <div class="ps-slot-divider"></div>
+          <div class="ps-minion-slot-name">${m.name}</div>
+          <div class="ps-minion-slot-str">+${m.strength_bonus} Str</div>
+        </div>`
+      : `<div class="ps-minion-slot ps-minion-empty"><div class="ps-slot-label">Minion</div></div>`;
+  }).join('');
+  const minionHtml = `
+    <div id="ps-minion-area">
+      <div class="ps-area-label">Minions</div>
+      <div class="ps-minion-pool">${minionSlots}</div>
+    </div>`;
+
+  overlay.innerHTML = `
+    <div id="player-sheet-panel">
+      ${inPlacement ? `<div id="ps-placement-banner">
+        <span>Placing: <strong>${_invPlacementItem.name}</strong> — click a slot to equip or pack it</span>
+        <button class="btn-secondary ps-discard-btn" onclick="_psDiscardPlacement()">Discard Item</button>
+        <button class="btn-secondary" onclick="_psBackToOffer()" style="margin-left:6px">&#x2190; Back</button>
+      </div>` : ''}
+      <button class="ps-close-btn" onclick="${inPlacement ? '_psBackToOffer()' : 'closePlayerSheet()'}">&#x2715; ${inPlacement ? 'Back' : 'Close'}</button>
+      <div class="ps-sheet-name">${p.name}</div>
+      <div id="ps-layout">
+        <div id="ps-left">
+          <div id="ps-movement-area">
+            <div class="ps-area-label">Movement</div>
+            <div class="ps-piles-row">${deckHtml}</div>
+          </div>
+          <div id="ps-pack-area">
+            <div class="ps-area-label">Pack</div>
+            <div class="ps-pack-grid">${packHtml}</div>
+          </div>
+          ${minionHtml}
+        </div>
+        <div id="ps-center">
+          <div id="ps-hero-area">${heroHtml}</div>
+          ${tcRowHtml}
+        </div>
+        <div id="ps-right">${equipHtml}</div>
+      </div>
+    </div>`;
+  if (!inPlacement) {
+    attachCardPreviews(overlay);
+    _attachCtxMenus(overlay);
+  }
+}
+
+function _psSlotCell(label, item, slotKey, slotIdx) {
+  const inPlacement = _invPlacementItem !== null;
+  // Determine if this slot type matches the item being placed
+  const _slotTypeMap = { equip_helmet: 'helmet', equip_chest: 'chest', equip_leg: 'legs', equip_weapon: 'weapon' };
+  const thisSlotType = _slotTypeMap[slotKey] || '';
+  const itemSlot = _invPlacementItem ? _invPlacementItem.slot : null;
+  const slotMatch = inPlacement && itemSlot === thisSlotType;
+  if (item) {
+    const imgSrc = item.card_image ? `/images/${item.card_image}` : null;
+    const safeName = (item.name || '').replace(/"/g, '&quot;');
+    const placementClass = slotMatch ? ' ps-slot-placement-target' : '';
+    const placementAttr  = slotMatch
+      ? `onclick="_psPlaceEquipDiscard('${slotKey}', ${slotIdx})" title="Equip here — replace ${safeName}"`
+      : (inPlacement ? '' : `data-ctx="equip" data-slot-key="${slotKey}" data-slot-idx="${slotIdx}" data-item-name="${safeName}" data-item-image="${imgSrc || ''}"`);
+    const previewAttrs = (!inPlacement && imgSrc)
+      ? `class="ps-slot ps-slot-card${placementClass} has-card-preview" data-card-image="${imgSrc}"` : null;
+    if (imgSrc) {
+      const cls = previewAttrs
+        ? previewAttrs
+        : `class="ps-slot ps-slot-card${placementClass}"`;
+      return `<div class="ps-equip-cell"><div ${cls} ${placementAttr}>
+        <div class="ps-slot-label">${label}</div>
+        <img class="ps-slot-card-img" src="${imgSrc}" alt="${item.name}">
+      </div></div>`;
+    }
+    const strSign = item.strength_bonus >= 0 ? '+' : '';
+    const badges = item.tokens ? ' ' + tokenBadges(item.tokens) : '';
+    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-filled${placementClass}" ${placementAttr}>
+      <div class="ps-slot-label">${label}</div>
+      <div class="ps-slot-divider"></div>
+      <div class="ps-slot-name">${item.name}${badges}</div>
+      <div class="ps-slot-sub">${strSign}${item.strength_bonus} Str</div>
+    </div></div>`;
+  }
+  // Empty slot
+  if (slotMatch) {
+    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-empty ps-slot-placement-target" onclick="_psPlaceEquip()" title="Equip here"><div class="ps-slot-label">${label}</div></div></div>`;
+  }
+  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-empty"><div class="ps-slot-label">${label}</div></div></div>`;
+}
+
+const _psEmptyCell = '<div class="ps-equip-cell"></div>';
+
+function _ps2HGhostSlot(weapon) {
+  const imgSrc = weapon && weapon.card_image ? `/images/${weapon.card_image}` : null;
+  if (imgSrc) {
+    return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-card ps-slot-ghost">
+      <div class="ps-slot-label">L. Hand</div>
+      <img class="ps-slot-card-img" src="${imgSrc}" alt="${weapon.name} (2H)">
+    </div></div>`;
+  }
+  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-ghost">
+    <div class="ps-slot-label">L. Hand (2H)</div>
+  </div></div>`;
+}
+
+function _psDisabledChestCell() {
+  return `<div class="ps-equip-cell"><div class="ps-slot ps-slot-disabled"><div class="ps-slot-label">Chest</div></div></div>`;
+}
+
+function _buildEquipGrid(p) {
+  const helmetSlots = p.helmet_slots || 1;
+  const chestSlots  = p.chest_slots  || 0;
+  const legSlots    = p.legs_slots   || 1;
+  const weaponHands = p.weapon_hands || 2;
+  const handRows    = Math.ceil(weaponHands / 2);
+  const extraRows   = Math.max(Math.max(chestSlots, 1) - 1, handRows - 1);
+
+  const rows = [];
+
+  // Extra head slots — shown ABOVE the main head (in reverse so closest extra is just above)
+  for (let i = helmetSlots - 1; i >= 1; i--) {
+    rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Head', p.helmets[i] || null, 'equip_helmet', i)}${_psEmptyCell}</div>`);
+  }
+
+  // Main head row
+  rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Head', p.helmets[0] || null, 'equip_helmet', 0)}${_psEmptyCell}</div>`);
+
+  // Main hand/chest row (R.Hand | Chest | L.Hand)
+  const mainWeapon = p.weapons[0] || null;
+  const r0 = 0 < weaponHands ? _psSlotCell('R. Hand', mainWeapon, 'equip_weapon', 0) : _psEmptyCell;
+  // L.Hand: if main weapon is 2H, show a ghost copy (display only, no interaction)
+  let l0;
+  if (1 < weaponHands) {
+    l0 = (mainWeapon && mainWeapon.hands === 2) ? _ps2HGhostSlot(mainWeapon) : _psSlotCell('L. Hand', p.weapons[1] || null, 'equip_weapon', 1);
+  } else {
+    l0 = _psEmptyCell;
+  }
+  // Chest: show disabled (crossed out) when player has no chest slots
+  const chestCell0 = chestSlots === 0 ? _psDisabledChestCell() : _psSlotCell('Chest', p.chest_armor[0] || null, 'equip_chest', 0);
+  rows.push(`<div class="ps-equip-row">${r0}${chestCell0}${l0}</div>`);
+
+  // Extra rows — blend extra hand pairs with extra chest slots
+  for (let i = 0; i < extraRows; i++) {
+    const rIdx    = (i + 1) * 2;
+    const lIdx    = (i + 1) * 2 + 1;
+    const cIdx    = i + 1;
+    const rLabel  = `Hand ${rIdx + 1}`;
+    const lLabel  = `Hand ${lIdx + 1}`;
+    const rCell   = rIdx < weaponHands ? _psSlotCell(rLabel, p.weapons[rIdx] || null, 'equip_weapon', rIdx) : _psEmptyCell;
+    const cCell   = cIdx < chestSlots  ? _psSlotCell('Chest', p.chest_armor[cIdx] || null, 'equip_chest', cIdx) : _psEmptyCell;
+    const lCell   = lIdx < weaponHands ? _psSlotCell(lLabel, p.weapons[lIdx] || null, 'equip_weapon', lIdx) : _psEmptyCell;
+    rows.push(`<div class="ps-equip-row">${rCell}${cCell}${lCell}</div>`);
+  }
+
+  // Main feet row
+  rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Feet', p.leg_armor[0] || null, 'equip_leg', 0)}${_psEmptyCell}</div>`);
+
+  // Extra feet slots — below main feet
+  for (let i = 1; i < legSlots; i++) {
+    rows.push(`<div class="ps-equip-row">${_psEmptyCell}${_psSlotCell('Feet', p.leg_armor[i] || null, 'equip_leg', i)}${_psEmptyCell}</div>`);
+  }
+
+  return `<div class="ps-equip-grid">${rows.join('')}</div>`;
+}
+
+// ================================================================ TRAIT/CURSE TOOLTIPS
+const _tcTooltip = (() => {
+  const el = document.createElement('div');
+  el.id = 'tc-tooltip';
+  el.className = 'tc-tooltip hidden';
+  document.body.appendChild(el);
+  return el;
+})();
+
+document.addEventListener('mouseover', (e) => {
+  const target = e.target.closest('.tc-hoverable');
+  if (!target) return;
+  const name = target.dataset.tcName || '';
+  const desc = target.dataset.tcDesc || '';
+  if (!name) return;
+  _tcTooltip.innerHTML = `<div class="tc-tooltip-name">${name}</div>${desc ? `<div class="tc-tooltip-desc">${desc}</div>` : ''}`;
+  _tcTooltip.classList.remove('hidden');
+});
+document.addEventListener('mousemove', (e) => {
+  if (_tcTooltip.classList.contains('hidden')) return;
+  const gap = 16;
+  const tw = _tcTooltip.offsetWidth;
+  const th = _tcTooltip.offsetHeight;
+  let x = e.clientX + gap;
+  let y = e.clientY + gap;
+  if (x + tw > window.innerWidth - 8) x = e.clientX - tw - gap;
+  if (y + th > window.innerHeight - 8) y = e.clientY - th - gap;
+  _tcTooltip.style.left = x + 'px';
+  _tcTooltip.style.top  = y + 'px';
+});
+document.addEventListener('mouseout', (e) => {
+  if (!e.target.closest('.tc-hoverable')) return;
+  if (!e.relatedTarget || !e.relatedTarget.closest('.tc-hoverable')) {
+    _tcTooltip.classList.add('hidden');
+  }
+});
+
+// ================================================================ MOVEMENT DECK VIEWER
+function openDeckViewer(pile) {
+  if (!gameState) return;
+  const p = gameState.players.find(x => x.player_id === viewingPlayerId) || gameState.players[0];
+  if (!p) return;
+  let cards = [];
+  let title = '';
+  if (pile === 'deck') {
+    cards = p.movement_deck_cards || [];
+    title = `Movement Deck (${cards.length} remaining)`;
+  } else {
+    cards = p.movement_discard_list || [];
+    title = `Movement Discard (${cards.length} cards)`;
+  }
+  const grid = cards.map(v =>
+    `<div class="mv-card mv-card-small"><div class="mv-card-number">${v}</div><div class="mv-card-label">MOVE</div></div>`
+  ).join('') || '<div class="dv-empty">Empty</div>';
+  document.getElementById('deck-viewer-title').textContent = title;
+  document.getElementById('deck-viewer-grid').innerHTML = grid;
+  document.getElementById('deck-viewer-modal').classList.remove('hidden');
+}
+function closeDeckViewer() {
+  document.getElementById('deck-viewer-modal').classList.add('hidden');
+}
+
+// ================================================================ CHARLIE WORK DECISION
+let _charlieWorkLevel = null;
+
+function _showCharlieWorkDecision(level) {
+  _charlieWorkLevel = level;
+  const modal = document.getElementById('charlie-work-modal');
+  if (!modal) return;
+  modal.querySelector('.modal-desc').textContent =
+    `You have "No More Charlie Work". Fight a harder Tier ${level + 1} monster for better rewards, or fight a normal Tier ${level} monster?`;
+  modal.classList.remove('hidden');
+}
+
+async function resolveCharlieWork(useIt) {
+  const modal = document.getElementById('charlie-work-modal');
+  if (modal) modal.classList.add('hidden');
+  const resp = await fetch('/api/resolve_charlie_work', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ use_it: useIt }),
+  });
+  const data = await resp.json();
+  if (data.state) { gameState = data.state; applyState(data.state); }
+  if (data.phase === 'combat' && data.combat_info) {
+    playMusic('Battle Music.wav');
+    showPreFightScene(data.combat_info, data.state);
+  } else {
+    await loadAndRenderAbilities();
+  }
+}
+
+// ================================================================ OCCUPIED SLOT MODAL
+let _occupiedSlotKey = null;
+let _occupiedSlotIdx = null;
+
+function _showOccupiedSlotModal(existingName, slotKey, idx) {
+  _occupiedSlotKey = slotKey;
+  _occupiedSlotIdx = idx;
+  const modal = document.getElementById('occupied-slot-modal');
+  if (!modal) return;
+  modal.querySelector('.modal-desc').textContent =
+    `"${existingName}" is already equipped here. What would you like to do?`;
+  modal.classList.remove('hidden');
+}
+
+function _occupiedSlotAction(action) {
+  const modal = document.getElementById('occupied-slot-modal');
+  if (modal) modal.classList.add('hidden');
+  if (action === 'discard') {
+    _finishPlacement({ placement: 'equip', equip_action: 'discard', equip_item_index: _occupiedSlotIdx });
+  } else if (action === 'to_pack') {
+    _finishPlacement({ placement: 'equip', equip_action: 'swap', equip_item_index: _occupiedSlotIdx });
+  }
+  // 'cancel' → do nothing, placement stays open
+}
+
+// ================================================================ BATTLE GEAR SECTION BUILDER
+function _buildBattleGearSection(combat) {
+  const gear   = combat.player_gear   || [];
+  const traits = combat.player_traits || [];
+  const curses = combat.player_curses || [];
+  const minions = combat.player_minions || [];
+  if (!gear.length && !traits.length && !curses.length && !minions.length) return '';
+
+  // Categorize gear by slot
+  const helmets = gear.filter(i => i.slot === 'helmet');
+  const chests  = gear.filter(i => i.slot === 'chest');
+  const legs    = gear.filter(i => i.slot === 'legs');
+  const weapons = gear.filter(i => i.slot === 'weapon');
+
+  // Slot capacities from enriched combat info
+  const helmetSlots = combat.player_helmet_slots || 1;
+  const chestSlots  = combat.player_chest_slots  || 1;
+  const legSlots    = combat.player_legs_slots   || 1;
+  const weaponHands = combat.player_weapon_hands || 2;
+
+  function equipSlot(item, label) {
+    if (item) {
+      const img = item.card_image ? `/images/${item.card_image}` : '';
+      const bonus = item.strength_bonus >= 0 ? `+${item.strength_bonus}` : `${item.strength_bonus}`;
+      if (img) {
+        return `<div class="battle-equip-slot has-card-preview" data-card-image="${img}" title="${item.name} (${bonus} Str)">
+          <img src="${img}" alt="${item.name}" onerror="this.parentElement.classList.add('is-empty')">
+        </div>`;
+      }
+      return `<div class="battle-equip-slot" title="${item.name} (${bonus})" style="display:flex;align-items:center;justify-content:center;font-size:7px;text-align:center;padding:2px">${item.name}</div>`;
+    }
+    return `<div class="battle-equip-slot is-empty" title="${label}"></div>`;
+  }
+
+  const handRows = Math.ceil(weaponHands / 2);
+  const extraRows = Math.max(chestSlots - 1, handRows - 1);
+  const rows = [];
+
+  // Extra head rows above main
+  for (let i = helmetSlots - 1; i >= 1; i--) {
+    rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell"></div><div class="battle-equip-cell">${equipSlot(helmets[i] || null, 'Head')}</div><div class="battle-equip-cell"></div></div>`);
+  }
+
+  // Main head row
+  rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell"></div><div class="battle-equip-cell">${equipSlot(helmets[0] || null, 'Head')}</div><div class="battle-equip-cell"></div></div>`);
+
+  // Main chest / weapon row
+  const rw0 = weaponHands >= 1 ? equipSlot(weapons[0] || null, 'R.Hand') : '';
+  const lw0 = weaponHands >= 2 ? equipSlot(weapons[1] || null, 'L.Hand') : '';
+  rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell">${rw0}</div><div class="battle-equip-cell">${equipSlot(chests[0] || null, 'Chest')}</div><div class="battle-equip-cell">${lw0}</div></div>`);
+
+  // Extra hand/chest rows
+  for (let i = 0; i < extraRows; i++) {
+    const rIdx = (i + 1) * 2;
+    const lIdx = (i + 1) * 2 + 1;
+    const cIdx = i + 1;
+    const rCell = rIdx < weaponHands ? equipSlot(weapons[rIdx] || null, `Hand ${rIdx + 1}`) : '';
+    const lCell = lIdx < weaponHands ? equipSlot(weapons[lIdx] || null, `Hand ${lIdx + 1}`) : '';
+    const cCell = cIdx < chestSlots ? equipSlot(chests[cIdx] || null, 'Chest') : '';
+    rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell">${rCell}</div><div class="battle-equip-cell">${cCell}</div><div class="battle-equip-cell">${lCell}</div></div>`);
+  }
+
+  // Main leg row
+  rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell"></div><div class="battle-equip-cell">${equipSlot(legs[0] || null, 'Feet')}</div><div class="battle-equip-cell"></div></div>`);
+
+  // Extra leg rows
+  for (let i = 1; i < legSlots; i++) {
+    rows.push(`<div class="battle-equip-row"><div class="battle-equip-cell"></div><div class="battle-equip-cell">${equipSlot(legs[i] || null, 'Feet')}</div><div class="battle-equip-cell"></div></div>`);
+  }
+
+  let html = `<div class="battle-equip-grid">${rows.join('')}</div>`;
+
+  if (minions.length) {
+    html += `<div class="battle-left-section-label" style="margin-top:6px">Minions</div>`;
+    for (const m of minions) {
+      if (m.card_image) {
+        html += `<div class="battle-equip-slot has-card-preview" data-card-image="/images/${m.card_image}" title="${m.name} (+${m.strength_bonus} Str)" style="width:56px;height:80px;margin:2px 0">
+          <img src="/images/${m.card_image}" alt="${m.name}" onerror="this.parentElement.classList.add('is-empty')">
+        </div>`;
+      } else {
+        html += `<div class="battle-left-tag" style="background:var(--surface2);border:1px solid var(--border);color:var(--gold)">${m.name} (+${m.strength_bonus})</div>`;
+      }
+    }
+  }
+  if (traits.length) {
+    html += `<div class="battle-left-section-label" style="margin-top:6px">Traits</div>`;
+    for (const t of traits) {
+      html += `<div class="battle-left-tag is-trait tc-hoverable" data-tc-name="${t.name}" data-tc-desc="${(t.description||'').replace(/"/g,'&quot;')}">${t.name}</div>`;
+    }
+  }
+  if (curses.length) {
+    html += `<div class="battle-left-section-label" style="margin-top:6px">Curses</div>`;
+    for (const c of curses) {
+      html += `<div class="battle-left-tag is-curse tc-hoverable" data-tc-name="${c.name}" data-tc-desc="${(c.description||'').replace(/"/g,'&quot;')}">${c.name}</div>`;
+    }
+  }
+  return html;
+}
+
+function _strBreakdownTitle(combat) {
+  const lines = [];
+  const base = combat.player_base_strength;
+  if (base !== undefined) lines.push(`Base: ${base}`);
+  for (const item of (combat.player_gear || [])) {
+    if (item.strength_bonus) {
+      const s = item.strength_bonus >= 0 ? `+${item.strength_bonus}` : `${item.strength_bonus}`;
+      lines.push(`${item.name}: ${s}`);
+    }
+  }
+  for (const t of (combat.player_traits || [])) {
+    if (t.tokens) lines.push(`${t.name}: +${t.tokens}`);
+  }
+  for (const m of (combat.player_minions || [])) {
+    lines.push(`${m.name} (minion): +${m.strength_bonus}`);
+  }
+  for (const c of (combat.player_curses || [])) {
+    if (c.tokens) lines.push(`${c.name}: ${c.tokens >= 0 ? '+' : ''}${c.tokens}`);
+  }
+  if (combat.prefight_str_bonus) lines.push(`Consumable bonus: +${combat.prefight_str_bonus}`);
+  for (const line of (combat.ability_breakdown || [])) {
+    lines.push(line.trim());
+  }
+  lines.push(`Total: ${combat.player_strength}`);
+  return lines.join('\n');
+}
+
+// ================================================================ INIT
+window.addEventListener('DOMContentLoaded', initSetup);
