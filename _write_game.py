@@ -555,7 +555,7 @@ def _offer_item(
                 f"Slot full. Move {current.name} to pack to make room?", log
             )
             if keep_in_pack:
-                if len(player.pack) < player.pack_size:
+                if player.pack_slots_free > 0:
                     player.unequip(current)
                     player.pack.append(current)
                     player.equip(item)

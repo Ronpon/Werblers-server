@@ -178,6 +178,10 @@ def api_resolve_offer():
             {**e, "card_image": _item_card_image_from_dict(e)}
             for e in result.get("equips", [])
         ]
+        pack_items = [
+            {**i, "card_image": _item_card_image_from_dict(i)}
+            for i in result.get("pack_items", [])
+        ]
         shop_remaining = [
             {**i, "card_image": _item_card_image_from_dict(i)}
             for i in result.get("shop_remaining", [])
@@ -186,6 +190,7 @@ def api_resolve_offer():
             "phase": "rake_it_in",
             "sub_type": result.get("sub_type", "chest"),
             "equips": equips,
+            "pack_items": pack_items,
             "shop_remaining": shop_remaining,
             "state": _build_state(),
             "log": combined_log,
@@ -263,7 +268,7 @@ def api_equip_from_pack():
                     #  but player.pack still contains the new item right now)
                     # We check against pack_size - (len(pack) - 1) because
                     # the new item leaves the pack when equipped.
-                    if len(player.pack) - 1 >= player.pack_size:
+                    if player.pack_slots_used - 1 >= player.pack_size:
                         return jsonify({"error": "Pack is full — can't swap to pack"}), 400
                     player.unequip(displaced)
                     player.add_to_pack(displaced)
@@ -319,8 +324,16 @@ def api_manage_item():
     if action == "to_pack":
         if source == "pack":
             return jsonify({"error": "Already in pack"}), 400
+        discard_pack_idx = data.get("discard_pack_index")
         if player.pack_slots_free <= 0:
-            return jsonify({"error": "Pack is full"}), 400
+            if discard_pack_idx is not None:
+                dpi = int(discard_pack_idx)
+                if 0 <= dpi < len(player.pack):
+                    player.pack.pop(dpi)
+                else:
+                    return jsonify({"error": "Invalid pack discard index"}), 400
+            else:
+                return jsonify({"error": "pack_full", "pack": [_ser_item(i) for i in player.pack]}), 409
         player.unequip(item)
         player.pack.append(item)
         from werblers_engine import effects as _fx
@@ -735,7 +748,8 @@ def api_fight():
     combat_info = result.get("combat_info")
     if combat_info:
         combat_info = _enrich_combat_info(combat_info)
-    return jsonify({"phase": "done", "state": _build_state(), "combat_info": combat_info})
+    phase = "summoned_done" if result.get("summoned_monster") else "done"
+    return jsonify({"phase": phase, "state": _build_state(), "combat_info": combat_info})
 
 @app.route("/api/release_monster", methods=["POST"])
 def api_release_monster():
@@ -752,7 +766,8 @@ def api_release_monster():
 
 @app.route("/api/summon_monster", methods=["POST"])
 def api_summon_monster():
-    """Convert a captured monster into a minion."""
+    """Summon a captured monster as an ENEMY, triggering a fight."""
+    global _last_log
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -760,10 +775,43 @@ def api_summon_monster():
     player = _game.current_player
     if idx < 0 or idx >= len(player.captured_monsters):
         return jsonify({"error": "Invalid monster index"}), 400
-    from werblers_engine.types import Minion
     monster = player.captured_monsters.pop(idx)
-    player.minions.append(Minion(name=monster.name, strength_bonus=monster.strength, effect_id=""))
-    return jsonify({"ok": True, "state": _build_state()})
+    # Set up a pending combat with this monster as the enemy
+    tier = monster.level
+    log = [f"{player.name} summons {monster.name} to fight!"]
+    other_players = [p for p in _game.players if p is not player]
+    has_reroll = any(t.effect_id in ("ill_come_in_again", "i_see_everything") for t in player.traits)
+    _game._prefight_str_bonus = 0
+    _game._prefight_monster_str_bonus = 0
+    _game._pending_combat = {
+        "monster": monster,
+        "effective_deck": _game.monster_decks.get(tier),
+        "other_players": other_players,
+        "level": tier,
+        "log": log,
+        "old_pos": player.position,
+        "new_pos": player.position,
+        "card_value": 0,
+        "tile_type": "MONSTER",
+        "ill_come_in_again_available": has_reroll,
+        "summoned_monster": True,
+    }
+    combat_info = {
+        "monster_name": monster.name,
+        "monster_strength": monster.strength,
+        "player_strength": player.combat_strength(),
+        "player_id": player.player_id,
+        "player_name": player.name,
+        "hero_id": player.hero.id.name if player.hero else None,
+        "category": "monster",
+        "level": tier,
+        "result": None,
+        "ill_come_in_again_available": has_reroll,
+    }
+    _game._last_combat_info = combat_info
+    _last_log = log
+    return jsonify({"ok": True, "phase": "combat", "state": _build_state(),
+                    "combat_info": _enrich_combat_info(combat_info)})
 
 # ------------------------------------------------------------------
 # Legacy single-call endpoint (still works for tests/old clients)
@@ -820,6 +868,10 @@ _SLOT_IMG_FOLDER = {
 _ITEM_FILENAME_OVERRIDES: dict[str, str] = {
     # Game data uses "Swiss Guard Helmet" (no apostrophe) but the card file is named with one
     "Swiss Guard Helmet": "Swiss Guard's Helmet",
+    # Game data uses "Pumped Up Kicks" (capital U) but files use "Pumped up Kicks"
+    "Pumped Up Kicks": "Pumped up Kicks",
+    # Card file uses abbreviated name
+    "Chestplate Made of What the Black Box is Made of": "Black Box Chestplate",
 }
 
 def _normalize_item_filename(name: str) -> str:
@@ -974,14 +1026,13 @@ def _ser_curse(c) -> dict:
 def _build_state() -> dict:
     g = _game
     current = g.current_player
-    mb1_defeated = any(p.miniboss1_defeated for p in g.players)
-    mb2_defeated = any(p.miniboss2_defeated for p in g.players)
     board_data = [
         {
             "index":     t.index,
             "tile_type": t.tile_type.name,
             "revealed":  t.revealed,
-            "image":     _tile_image(t, g.is_night, mb1_defeated, mb2_defeated),
+            "image":     _tile_image(t, g.is_night, mb1_defeated=False, mb2_defeated=False),
+            "image_defeated": _tile_image(t, g.is_night, mb1_defeated=True, mb2_defeated=True) if t.tile_type == TileType.MINIBOSS else None,
         }
         for t in g.board[1:]
     ]

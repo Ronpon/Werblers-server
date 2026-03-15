@@ -154,7 +154,6 @@ ITEM_POOL_L2: list[Item] = [
     Item("Rapier of Taltos", EquipSlot.WEAPON, strength_bonus=7),
     Item("Transmogrifier", EquipSlot.WEAPON, strength_bonus=0, effect_id="transmogrifier"),
     Item("Freeze Ray", EquipSlot.WEAPON, strength_bonus=2, hands=2, effect_id="freeze_ray", is_ranged=True),
-    Item("War Helm", EquipSlot.HELMET, strength_bonus=3),
     Item("Football Helmet", EquipSlot.HELMET, strength_bonus=5),  # Won't prevent concussion.
     # Tier 2 consumables (2 copies each)
     Item("Monster Capture Device Mark II",  EquipSlot.CONSUMABLE, is_consumable=True),

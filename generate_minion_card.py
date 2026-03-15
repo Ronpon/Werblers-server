@@ -121,6 +121,22 @@ MINIONS: dict[str, dict] = {
         "output": "Tamed Devil Card.png",
         "blurb": "TBD.",
     },
+    "crazed_gremlin": {
+        "name": "Crazed Gremlin",
+        "type": "Minion",
+        "strength": "-2",
+        "portrait": "Crazed Gremlin.png",
+        "output": "Crazed Gremlin Card.png",
+        "blurb": "Oh no.",
+    },
+    "cute_gremlin": {
+        "name": "Cute Gremlin",
+        "type": "Minion",
+        "strength": "+2",
+        "portrait": "Cute Gremlin.png",
+        "output": "Cute Gremlin Card.png",
+        "blurb": "Aww.",
+    },
 }
 
 

@@ -67,6 +67,7 @@ DARK_ELF_SCIMITAR = Item(
     name="No'Cappin's Scimitar",
     slot=EquipSlot.WEAPON,
     strength_bonus=6,
+    effect_id="nocappins_scimitar",
 )
 
 
@@ -117,6 +118,7 @@ HEROES: dict[HeroId, Hero] = {
                 name="No'Cappin's Scimitar",
                 slot=EquipSlot.WEAPON,
                 strength_bonus=6,
+                effect_id="nocappins_scimitar",
             ),
         ],
     ),

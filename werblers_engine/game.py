@@ -1428,6 +1428,10 @@ class Game:
                 }
             self._prefight_str_bonus = 0
             self._prefight_monster_str_bonus = 0
+            # Compute ability modifiers for pre-fight STR display
+            _ab_log: list[str] = []
+            _ab_player_mod, _ab_monster_mod = enc._apply_werbler_modifiers(
+                player, werbler, _ab_log, self.is_night)
             self._pending_combat = {
                 "type": "werbler",
                 "monster": werbler,
@@ -1436,11 +1440,18 @@ class Game:
                 "log": log,
                 "old_pos": old_pos, "new_pos": new_pos,
                 "card_value": card_value, "tile_type": tile.tile_type.name,
+                "ability_player_mod": _ab_player_mod,
+                "ability_monster_mod": _ab_monster_mod,
+                "ability_breakdown": _ab_log,
             }
             combat_info = {
                 "monster_name": werbler.name,
-                "monster_strength": werbler.strength,
-                "player_strength": player.combat_strength(),
+                "monster_strength": werbler.strength + _ab_monster_mod,
+                "player_strength": player.combat_strength() + _ab_player_mod,
+                "ability_player_mod": _ab_player_mod,
+                "ability_monster_mod": _ab_monster_mod,
+                "ability_breakdown": _ab_log,
+                "nice_hat_bonus": getattr(werbler, "_brady_nice_hat_bonus", 0),
                 "description": werbler.description,
                 "player_id": player.player_id,
                 "player_name": player.name,
@@ -1604,8 +1615,12 @@ class Game:
                 self.winner = player.player_id
             self._last_combat_info = {
                 "monster_name": werbler.name,
-                "monster_strength": werbler.strength,
-                "player_strength": player_str_at_fight,
+                "monster_strength": werbler.strength + pc.get("ability_monster_mod", 0),
+                "player_strength": player_str_at_fight + pc.get("ability_player_mod", 0),
+                "ability_player_mod": pc.get("ability_player_mod", 0),
+                "ability_monster_mod": pc.get("ability_monster_mod", 0),
+                "ability_breakdown": pc.get("ability_breakdown", []),
+                "nice_hat_bonus": getattr(werbler, "_brady_nice_hat_bonus", 0),
                 "player_id": player.player_id,
                 "player_name": player.name,
                 "hero_id": player.hero.id.name if player.hero else None,
@@ -1655,7 +1670,9 @@ class Game:
         self._finish_post_encounter(player, log)
         if self.status == GameStatus.WON:
             log.append(f"\U0001f389 Game Over \u2014 {player.name} Wins!")
-        self._advance_turn()
+        is_summoned = pc.get("summoned_monster", False)
+        if not is_summoned:
+            self._advance_turn()
         return {
             "phase": "done", "log": log,
             "moved_from": old_pos, "moved_to": new_pos,
@@ -1663,6 +1680,7 @@ class Game:
             "combat_result": combat_result.name if combat_result else None,
             "combat_info": self._last_combat_info,
             "game_status": self.status.name, "winner": self.winner,
+            "summoned_monster": is_summoned,
         }
 
     def flee_monster(self) -> dict:
@@ -1850,7 +1868,8 @@ class Game:
                 if not e.locked_by_curse_id
                 or not any(c.effect_id == e.locked_by_curse_id for c in player.curses)
             ]
-            if unlocked:
+            pack_items = list(player.pack)
+            if unlocked or pack_items:
                 self._pending_offer = {
                     "type": "rake_it_in",
                     "sub_type": offer_type,
@@ -1867,6 +1886,7 @@ class Game:
                     "log": log,
                     "sub_type": offer_type,
                     "equips": [_item_to_dict(e) for e in unlocked],
+                    "pack_items": [_item_to_dict(i) for i in pack_items],
                     "shop_remaining": [_item_to_dict(i) for i in shop_remaining],
                     "moved_from": pending["moved_from"],
                     "moved_to": pending["moved_to"],
@@ -1917,20 +1937,28 @@ class Game:
         bonus_item_info: Optional[dict] = None
 
         if use_it:
-            slot_map = {
-                "equip_helmet": player.helmets,
-                "equip_chest":  player.chest_armor,
-                "equip_leg":    player.leg_armor,
-                "equip_weapon": player.weapons,
-            }
-            slot_list = slot_map.get(discard_slot, [])
-            if slot_list and 0 <= discard_idx < len(slot_list):
-                discarded = slot_list[discard_idx]
-                player.unequip(discarded)
-                log.append(f"  Rake It In!: discarded {discarded.name}.")
+            if discard_slot == "pack":
+                if 0 <= discard_idx < len(player.pack):
+                    discarded = player.pack.pop(discard_idx)
+                    log.append(f"  Rake It In!: discarded {discarded.name} from pack.")
+                else:
+                    log.append("  Rake It In!: invalid pack discard choice \u2014 skipping.")
+                    use_it = False
             else:
-                log.append("  Rake It In!: invalid discard choice \u2014 skipping.")
-                use_it = False
+                slot_map = {
+                    "equip_helmet": player.helmets,
+                    "equip_chest":  player.chest_armor,
+                    "equip_leg":    player.leg_armor,
+                    "equip_weapon": player.weapons,
+                }
+                slot_list = slot_map.get(discard_slot, [])
+                if slot_list and 0 <= discard_idx < len(slot_list):
+                    discarded = slot_list[discard_idx]
+                    player.unequip(discarded)
+                    log.append(f"  Rake It In!: discarded {discarded.name}.")
+                else:
+                    log.append("  Rake It In!: invalid discard choice \u2014 skipping.")
+                    use_it = False
 
         if use_it:
             if sub_type == "chest":
@@ -1980,8 +2008,10 @@ class Game:
             import copy as _copy
             consumable = next((c for c in C.CONSUMABLE_POOL if c.name == item.name), None)
             if consumable:
-                player.consumables.append(_copy.copy(consumable))
-                log.append(f"  {item.name} added to consumables.")
+                if player.add_consumable_to_pack(_copy.copy(consumable)):
+                    log.append(f"  {item.name} added to consumables.")
+                else:
+                    log.append(f"  {item.name} (consumable) — pack full, discarded.")
             else:
                 log.append(f"  {item.name} (consumable) — unknown type, discarded.")
             return

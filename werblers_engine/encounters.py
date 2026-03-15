@@ -180,8 +180,10 @@ def _offer_item(
         from . import content as _C
         consumable = next((c for c in _C.CONSUMABLE_POOL if c.name == item.name), None)
         if consumable:
-            player.consumables.append(_copy.copy(consumable))
-            log.append(f"  {item.name} added to consumables.")
+            if player.add_consumable_to_pack(_copy.copy(consumable)):
+                log.append(f"  {item.name} added to consumables.")
+            else:
+                log.append(f"  {item.name} (consumable) — pack full, discarded.")
         else:
             log.append(f"  {item.name} (consumable) — unknown type, discarded.")
         return
@@ -958,6 +960,10 @@ def _apply_werbler_modifiers(
             penalty = melee_count * 3
             player_mod -= penalty
             log.append(f"  Big and Tall: {melee_count} melee weapon(s) lose {penalty} Str.")
+        # Nice Hat: accumulated bonus from prior thefts (display only)
+        nice_hat = getattr(werbler, "_brady_nice_hat_bonus", 0)
+        if nice_hat:
+            log.append(f"  Nice Hat: +{nice_hat} Str from stolen head armour")
 
     elif wid == "harry":
         # Light it up!: +10 Str during the day
@@ -1008,6 +1014,7 @@ def _apply_werbler_loss(
             stolen_str = helmet.strength_bonus
             werbler.strength += stolen_str
             werbler._brady_thefts = stolen_count + 1  # type: ignore[attr-defined]
+            werbler._brady_nice_hat_bonus = getattr(werbler, "_brady_nice_hat_bonus", 0) + stolen_str  # type: ignore[attr-defined]
             _fx.refresh_tokens(player)
             log.append(
                 f"  Nice Hat: Brady stole {helmet.name} (+{stolen_str} Str)! "

@@ -345,8 +345,10 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> None:
         item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=8)
         if player.equip(item):
             log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — equipped!")
+        elif player.add_to_pack(item):
+            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — chest slot full, added to pack.")
         else:
-            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — no slot, discarded.")
+            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — no slot and pack full, discarded.")
 
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)

@@ -71,7 +71,7 @@ class TestHeadArmourPools:
             assert name not in l2_names, f"{name} should not be in L2 pool"
 
     def test_tier2_helmets_in_L2_pool(self):
-        expected = {"Iron Helm", "War Helm"}
+        expected = {"Iron Helm"}
         assert expected <= self._helmets(C.ITEM_POOL_L2)
 
     def test_tier3_helmets_in_L3_pool(self):
@@ -297,7 +297,7 @@ class TestHeadArmourIntegration:
             for item in pool:
                 if item.name in {"Knight's Helm", "Iron Helm", "Dragon Helm",
                                  "Titan Helm", "Crown of Thorns", "Face Mask",
-                                 "Football Helmet", "War Helm"}:
+                                 "Football Helmet"}:
                     assert item.slot == EquipSlot.HELMET, (
                         f"{item.name} should be HELMET slot, got {item.slot}"
                     )

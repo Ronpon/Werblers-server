@@ -190,9 +190,20 @@ function buildBoard() {
 }
 function updateBoard(state) {
   buildBoard();
+  // Determine miniboss defeat flags for the currently-viewed player
+  const viewP = state.players.find(x => x.player_id === viewingPlayerId) || state.players[0];
+  const mb1Done = viewP ? viewP.miniboss1_defeated : false;
+  const mb2Done = viewP ? viewP.miniboss2_defeated : false;
   for (const tile of state.board) {
     const el = _tileEls[tile.index];
-    if (el) el.querySelector('img.tile-bg').src = `/images/${tile.image}`;
+    if (!el) continue;
+    let img = tile.image;
+    // Override miniboss tile image per-player
+    if (tile.image_defeated) {
+      const isDefeated = (tile.index === 30 && mb1Done) || (tile.index === 60 && mb2Done);
+      if (isDefeated) img = tile.image_defeated;
+    }
+    el.querySelector('img.tile-bg').src = `/images/${img}`;
   }
   for (let n = 1; n <= 90; n++) {
     _tileEls[n].querySelector('.token-area').innerHTML = '';
@@ -248,6 +259,7 @@ function updatePlayerTabs(state) {
       updatePlayerTabs(state);
       updatePlayerStats(state);
       updateMovementSection(state);
+      updateBoard(state);
       renderPlayerSheet(state);
     });
     tabs.appendChild(btn);
@@ -561,9 +573,11 @@ function updateLog(log) {
 }
 // ================================================================ INTERACTIVE TURN FLOW
 let _pendingCardIndex = null;
+let _moveInFlight = false;
 
 function promptDirection(cardIndex, cardValue) {
   // cardValue here is already the display value (raw + hero movement bonus)
+  if (_moveInFlight) return;
   if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
   const p = gameState.players.find(x => x.is_current);
   if (!p) return;
@@ -578,8 +592,9 @@ function promptDirection(cardIndex, cardValue) {
 function confirmDirection(dir) {
   document.getElementById('direction-modal').classList.add('hidden');
   if (_pendingCardIndex === null) return;
-  beginMove(_pendingCardIndex, dir);
+  const idx = _pendingCardIndex;
   _pendingCardIndex = null;
+  beginMove(idx, dir);
 }
 
 function cancelDirection() {
@@ -588,44 +603,54 @@ function cancelDirection() {
 }
 
 async function beginMove(cardIndex, direction = 'forward') {
+  if (_moveInFlight) return;
   if (!gameState || gameState.game_status !== 'IN_PROGRESS') return;
-  const activated = Object.assign({}, abilityChoices);
-  const resp = await fetch('/api/begin_move', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ card_index: cardIndex, flee: false, activated, direction }),
-  });
-  const data = await resp.json();
-  if (data.state) viewingPlayerId = data.state.current_player_id;
-  applyState(data.state);
-  if (data.phase === 'combat') {
-    playMusic('Battle Music.wav');
-    showPreFightScene(data.combat_info, data.state);
-    return;
-  }
-  if (data.combat_info) {
-    playMusic('Battle Music.wav');
-    showBattleScene(data.combat_info, data.state);
-    return;
-  }
-  if (data.phase === 'charlie_work') {
-    _showCharlieWorkDecision(data.level);
-    return;
-  }
-  const ts = data.tile_scene || {};
-  if (data.phase === 'done') {
-    _resumeTierMusic(data.state);
-    if (ts.tile_type === 'BLANK') {
-      showTileScene(ts, () => loadAndRenderAbilities());
-    } else {
-      await loadAndRenderAbilities();
+  _moveInFlight = true;
+  try {
+    const activated = Object.assign({}, abilityChoices);
+    const resp = await fetch('/api/begin_move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ card_index: cardIndex, flee: false, activated, direction }),
+    });
+    if (!resp.ok) { console.error('begin_move failed', resp.status); return; }
+    const data = await resp.json();
+    if (!data.state) { console.error('begin_move: no state returned'); return; }
+    viewingPlayerId = data.state.current_player_id;
+    applyState(data.state);
+    if (data.phase === 'combat') {
+      playMusic('Battle Music.wav');
+      showPreFightScene(data.combat_info, data.state);
+      return;
     }
-  } else if (data.phase === 'offer_chest') {
-    _pendingOfferData = data.offer;
-    showChestModal(data.offer, ts);
-  } else if (data.phase === 'offer_shop') {
-    _pendingOfferData = data.offer;
-    showShopModal(data.offer, data.state, ts);
+    if (data.combat_info) {
+      playMusic('Battle Music.wav');
+      showBattleScene(data.combat_info, data.state);
+      return;
+    }
+    if (data.phase === 'charlie_work') {
+      _showCharlieWorkDecision(data.level);
+      return;
+    }
+    const ts = data.tile_scene || {};
+    if (data.phase === 'done') {
+      _resumeTierMusic(data.state);
+      if (ts.tile_type === 'BLANK') {
+        showTileScene(ts, () => loadAndRenderAbilities());
+      } else {
+        await loadAndRenderAbilities();
+      }
+    } else if (data.phase === 'offer_chest') {
+      _pendingOfferData = data.offer;
+      showChestModal(data.offer, ts);
+    } else if (data.phase === 'offer_shop') {
+      _pendingOfferData = data.offer;
+      showShopModal(data.offer, data.state, ts);
+    }
+  } catch (err) {
+    console.error('beginMove error:', err);
+  } finally {
+    _moveInFlight = false;
   }
 }
 // ================================================================ CHEST MODAL
@@ -818,6 +843,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') _closeCtxMen
 
 function _attachCtxMenus(container) {
   const _jsEsc = s => s.replace(/'/g, "\\'");
+  const _isMyTurn = () => gameState && viewingPlayerId === gameState.current_player_id;
   container.querySelectorAll('[data-ctx="equip"]').forEach(el => {
     el.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -827,8 +853,12 @@ function _attachCtxMenus(container) {
       const imgSrc   = el.dataset.itemImage;
       const entries = [];
       if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
-      entries.push({ label: 'Move to Pack', action: `manageItem('to_pack','${slotKey}',${slotIdx});_closeCtxMenu()` });
-      entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','${slotKey}',${slotIdx})}_closeCtxMenu()`, danger: true });
+      if (_isMyTurn()) {
+        entries.push({ label: 'Move to Pack', action: `manageItem('to_pack','${slotKey}',${slotIdx});_closeCtxMenu()` });
+        entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','${slotKey}',${slotIdx})}_closeCtxMenu()`, danger: true });
+      } else {
+        entries.push({ label: 'Not your turn', action: `_closeCtxMenu()` });
+      }
       _showCtxMenu(e.clientX, e.clientY, entries);
     });
   });
@@ -842,8 +872,12 @@ function _attachCtxMenus(container) {
       const entries = [];
       if (imgSrc) entries.push({ label: 'View Monster Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
       if (devImg) entries.push({ label: 'View Capture Device Card', action: `zoomCard('${_jsEsc(devImg)}');_closeCtxMenu()` });
-      entries.push({ label: `Summon ${name}`, action: `summonCapturedMonster(${idx});_closeCtxMenu()` });
-      entries.push({ label: `Release ${name}`, action: `releaseCapturedMonster(${idx});_closeCtxMenu()`, danger: true });
+      if (_isMyTurn()) {
+        entries.push({ label: `Summon ${name}`, action: `summonCapturedMonster(${idx});_closeCtxMenu()` });
+        entries.push({ label: `Release ${name}`, action: `releaseCapturedMonster(${idx});_closeCtxMenu()`, danger: true });
+      } else {
+        entries.push({ label: 'Not your turn', action: `_closeCtxMenu()` });
+      }
       _showCtxMenu(e.clientX, e.clientY, entries);
     });
   });
@@ -857,32 +891,147 @@ function _attachCtxMenus(container) {
       const consumableIdx = parseInt(el.dataset.consumableIdx ?? '-1', 10);
       const entries = [];
       if (imgSrc) entries.push({ label: 'View Card', action: `zoomCard('${_jsEsc(imgSrc)}');_closeCtxMenu()` });
-      if (!isConsumable) entries.push({ label: 'Equip', action: `manageItem('to_equip','pack',${packIdx});_closeCtxMenu()` });
-      if (isConsumable && consumableIdx >= 0) {
-        const canUseNow = gameState && !gameState.has_pending_combat;
-        if (canUseNow) entries.push({ label: `Use ${name}`, action: `_closeCtxMenu();promptUseConsumable(${consumableIdx})` });
-        entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){_discardConsumable(${consumableIdx})}_closeCtxMenu()`, danger: true });
+      if (_isMyTurn()) {
+        if (!isConsumable) entries.push({ label: 'Equip', action: `manageItem('to_equip','pack',${packIdx});_closeCtxMenu()` });
+        if (isConsumable && consumableIdx >= 0) {
+          const canUseNow = gameState && !gameState.has_pending_combat;
+          if (canUseNow) entries.push({ label: `Use ${name}`, action: `_closeCtxMenu();promptUseConsumable(${consumableIdx})` });
+          entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){_discardConsumable(${consumableIdx})}_closeCtxMenu()`, danger: true });
+        } else {
+          entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','pack',${packIdx})}_closeCtxMenu()`, danger: true });
+        }
       } else {
-        entries.push({ label: `Discard ${name}`, action: `if(confirm('Discard ${name.replace(/'/g, "\\'")}?')){manageItem('discard','pack',${packIdx})}_closeCtxMenu()`, danger: true });
+        entries.push({ label: 'Not your turn', action: `_closeCtxMenu()` });
       }
       _showCtxMenu(e.clientX, e.clientY, entries);
     });
   });
 }
 
-async function manageItem(action, source, idx) {
+/* ---------- Drag & Drop for player sheet ---------- */
+function _attachDragDrop(container) {
+  const _isMyTurn = () => gameState && viewingPlayerId === gameState.current_player_id;
+  if (!_isMyTurn()) return;
+
+  const _slotTypeMap = { equip_helmet: 'helmet', equip_chest: 'chest', equip_leg: 'legs', equip_weapon: 'weapon' };
+
+  // Make filled equip & pack slots draggable
+  container.querySelectorAll('.ps-slot.ps-slot-card, .ps-slot.ps-slot-filled').forEach(el => {
+    if (el.classList.contains('ps-slot-ghost') || el.classList.contains('ps-slot-disabled')) return;
+    const ctx = el.dataset.ctx;
+    if (!ctx || (ctx !== 'equip' && ctx !== 'pack')) return;
+    el.setAttribute('draggable', 'true');
+    el.addEventListener('dragstart', e => {
+      const info = { ctx };
+      if (ctx === 'equip') { info.slotKey = el.dataset.slotKey; info.slotIdx = el.dataset.slotIdx; }
+      else { info.packIdx = el.dataset.packIdx; info.isConsumable = el.dataset.isConsumable === 'true'; }
+      e.dataTransfer.setData('text/plain', JSON.stringify(info));
+      e.dataTransfer.effectAllowed = 'move';
+      el.classList.add('ps-dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('ps-dragging');
+      container.querySelectorAll('.ps-drag-over').forEach(t => t.classList.remove('ps-drag-over'));
+    });
+  });
+
+  // Equip slots (filled or empty) as drop targets for pack items
+  container.querySelectorAll('[data-slot-key]').forEach(el => {
+    el.addEventListener('dragover', e => {
+      try {
+        // Only allow pack→equip drops
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        el.classList.add('ps-drag-over');
+      } catch (_) {}
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('ps-drag-over'));
+    el.addEventListener('drop', async e => {
+      e.preventDefault();
+      el.classList.remove('ps-drag-over');
+      let info;
+      try { info = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (_) { return; }
+      if (info.ctx !== 'pack' || info.isConsumable) return;
+      const packIdx = parseInt(info.packIdx, 10);
+      // Use equip_from_pack endpoint (supports displacement via to_pack)
+      const resp = await fetch('/api/equip_from_pack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pack_index: packIdx, to_pack: true }),
+      });
+      const data = await resp.json();
+      if (data.ok) { gameState = data.state; renderAll(); }
+      else { console.warn(data.error || 'Cannot equip here'); }
+    });
+  });
+
+  // Pack grid as drop target for equipped items
+  const packGrid = container.querySelector('.ps-pack-grid');
+  if (packGrid) {
+    packGrid.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      packGrid.classList.add('ps-drag-over');
+    });
+    packGrid.addEventListener('dragleave', e => {
+      if (!packGrid.contains(e.relatedTarget)) packGrid.classList.remove('ps-drag-over');
+    });
+    packGrid.addEventListener('drop', async e => {
+      e.preventDefault();
+      packGrid.classList.remove('ps-drag-over');
+      let info;
+      try { info = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (_) { return; }
+      if (info.ctx !== 'equip') return;
+      await manageItem('to_pack', info.slotKey, parseInt(info.slotIdx, 10));
+    });
+  }
+}
+
+async function manageItem(action, source, idx, extraParams) {
+  const body = { action, source, index: idx };
+  if (extraParams) Object.assign(body, extraParams);
   const resp = await fetch('/api/manage_item', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, source, index: idx }),
+    body: JSON.stringify(body),
   });
   const data = await resp.json();
+  if (data.error === 'pack_full' && data.pack) {
+    _showPackDiscardChoice(data.pack, action, source, idx);
+    return;
+  }
   if (data.ok && data.state) {
     gameState = data.state;
     renderPlayerSheetFull(gameState);
+    await loadAndRenderAbilities();
   } else if (data.error) {
     alert(data.error);
   }
+}
+
+function _showPackDiscardChoice(packItems, origAction, origSource, origIdx) {
+  const overlay = document.createElement('div');
+  overlay.id = 'pack-discard-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 24px;max-width:480px;text-align:center';
+  box.innerHTML = `<div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:12px">Pack Full</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:16px">Choose an item to discard from your pack:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${packItems.map((p, i) => {
+      const img = p.card_image ? `<img src="/images/${p.card_image}" style="width:70px;border-radius:4px;display:block">` : '';
+      return `<div class="rake-equip-btn" style="cursor:pointer" onclick="window._confirmPackDiscard(${i})">
+        ${img}
+        <div style="font-size:10px;color:var(--text,#e0e0e0);margin-top:4px;max-width:80px;word-break:break-word">${p.name}</div>
+      </div>`;
+    }).join('')}</div>
+    <div style="margin-top:16px"><button class="btn-secondary" onclick="window._cancelPackDiscard()">Cancel</button></div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  window._confirmPackDiscard = async (dpi) => {
+    overlay.remove();
+    await manageItem(origAction, origSource, origIdx, { discard_pack_index: dpi });
+  };
+  window._cancelPackDiscard = () => overlay.remove();
 }
 
 async function _discardConsumable(consumableIdx) {
@@ -985,18 +1134,24 @@ async function releaseCapturedMonster(idx) {
 }
 
 async function summonCapturedMonster(idx) {
-  if (!confirm('Summon this monster as a permanent minion? This cannot be undone.')) return;
+  if (!confirm('Summon this monster as an enemy to fight? This cannot be undone.')) return;
   const resp = await fetch('/api/summon_monster', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ index: idx }),
   });
   const data = await resp.json();
-  if (data.ok && data.state) {
+  if (data.error) { alert(data.error); return; }
+  if (data.state) {
     gameState = data.state;
-    renderPlayerSheetFull(gameState);
-  } else if (data.error) {
-    alert(data.error);
+    viewingPlayerId = data.state.current_player_id;
+    applyState(data.state);
+  }
+  if (data.phase === 'combat' && data.combat_info) {
+    // Close the player sheet if open, then show the battle scene
+    closePlayerSheet();
+    playMusic('Battle Music.wav');
+    showPreFightScene(data.combat_info, gameState);
   }
 }
 
@@ -1084,6 +1239,7 @@ function showRakeItInModal(data) {
 
   const subType = data.sub_type || 'chest';
   const equips = data.equips || [];
+  const packItems = data.pack_items || [];
   const shopRemaining = data.shop_remaining || [];
 
   const equipsHtml = equips.map((e, i) => {
@@ -1095,6 +1251,15 @@ function showRakeItInModal(data) {
     </div>`;
   }).join('');
 
+  const packHtml = packItems.length > 0 ? `<div class="rake-section-label">Or discard from pack:</div>
+    <div class="rake-items-row">${packItems.map((p, i) => {
+      const img = p.card_image ? `<img class="rake-item-thumb" src="/images/${p.card_image}" alt="${p.name}">` : '';
+      return `<div class="rake-equip-btn" data-slot="pack" data-idx="${i}" onclick="rakeSelectDiscard('pack',${i},this)">
+        ${img}
+        <div class="rake-item-name">${p.name}</div>
+      </div>`;
+    }).join('')}</div>` : '';
+
   let shopHtml = '';
   if (subType === 'shop' && shopRemaining.length > 0) {
     shopHtml = `<div class="rake-section-label">Choose a 2nd item from the shop:</div>
@@ -1105,15 +1270,23 @@ function showRakeItInModal(data) {
         <div class="rake-item-name">${it.name}</div>
       </div>`;
     }).join('')}</div>`;
+  } else if (subType === 'chest') {
+    shopHtml = `<div class="rake-section-label">Bonus:</div>
+    <div class="rake-items-row">
+      <div class="rake-equip-btn rake-draw-item">
+        <div class="rake-draw-icon">?</div>
+        <div class="rake-item-name">Draw Item</div>
+      </div>
+    </div>`;
   }
 
   const descText = subType === 'shop'
-    ? 'Discard an equipped item to take a second item from the shop!'
-    : 'Discard an equipped item to draw a bonus item from the deck!';
+    ? 'Discard an equipped or packed item to take a second item from the shop!'
+    : 'Discard an equipped or packed item to draw a bonus item from the deck!';
 
   modal.querySelector('.rake-desc').textContent = descText;
   modal.querySelector('.rake-equips-row').innerHTML = equipsHtml;
-  modal.querySelector('.rake-shop-section').innerHTML = shopHtml;
+  modal.querySelector('.rake-shop-section').innerHTML = packHtml + shopHtml;
   modal.classList.remove('hidden');
 }
 
@@ -1335,7 +1508,7 @@ function _renderBystanderScreen(bystander, combat, state) {
           (STR ${combat.monster_strength}) or skip.
         </div>
         ${monsterImg ? `<div style="text-align:center;margin:8px 0">
-          <img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" style="max-height:160px" onclick="zoomCard(this.src)">
+          <img class="battle-card-img" src="${monsterImg}" alt="${combat.monster_name}" style="max-height:160px;width:auto" onclick="zoomCard(this.src)">
         </div>` : ''}
         <div class="prefight-consumables-section">
           <div class="prefight-consumables-title">${bystander.name}'s Consumables</div>
@@ -1766,10 +1939,12 @@ async function _pickPlayerForPackCurse(packIndex, targetPlayerId) {
   await _callUsePackConsumable(packIndex, targetPlayerId);
 }
 
+let _lastFightWasSummon = false;
 async function doFight() {
   const resp = await fetch('/api/fight', { method: 'POST' });
   const data = await resp.json();
   if (data.state) gameState = data.state;
+  _lastFightWasSummon = data.phase === 'summoned_done';
   if (data.combat_info) {
     showBattleScene(data.combat_info, data.state);
   } else {
@@ -1872,6 +2047,7 @@ async function _finishBattleContinue() {
     viewingPlayerId = gameState.current_player_id;
     applyState(gameState);
     _resumeTierMusic();
+    _lastFightWasSummon = false;
     await loadAndRenderAbilities();
   }
 }
@@ -1979,7 +2155,8 @@ function renderPlayerSheetFull(state) {
     } else if (item && item.card_image) {
       const previewClass = inPlacement ? '' : ' has-card-preview';
       const previewData = inPlacement ? '' : `data-card-image="/images/${item.card_image}"`;
-      const canUseConsumable = !inPlacement && item.isConsumable && (item.consumableIdx ?? -1) >= 0 && gameState && !gameState.has_pending_combat;
+      const isMyTurn = gameState && p.player_id === gameState.current_player_id;
+      const canUseConsumable = !inPlacement && isMyTurn && item.isConsumable && (item.consumableIdx ?? -1) >= 0 && gameState && !gameState.has_pending_combat;
       const consumableClickAttr = canUseConsumable ? ` onclick="promptUseConsumable(${item.consumableIdx})" title="Click to use ${(item.label||'').replace(/"/g,'&quot;')}" style="cursor:pointer"` : '';
       const ctxAttr = inPlacement
         ? `onclick="_psPlacePack(${i})" title="Pack here — discard ${(item.label || '').replace(/"/g, '&quot;')}"`
@@ -2095,6 +2272,7 @@ function renderPlayerSheetFull(state) {
   attachCardPreviews(overlay);
   if (!inPlacement) {
     _attachCtxMenus(overlay);
+    _attachDragDrop(overlay);
   }
 }
 
@@ -2144,7 +2322,7 @@ function _psSlotCell(label, item, slotKey, slotIdx) {
   }
   return `<div class="ps-equip-cell">
     <div class="ps-slot-title-above">${label}</div>
-    <div class="ps-slot ps-slot-empty"></div>
+    <div class="ps-slot ps-slot-empty" data-slot-key="${slotKey}"></div>
   </div>`;
 }
 
@@ -2464,7 +2642,8 @@ function _monsterStrBreakdownTitle(combat) {
   const lines = [];
   // Derive base from total minus modifiers
   const abilityMod = combat.ability_monster_mod || 0;
-  const baseSt = (combat.monster_strength || 0) - abilityMod;
+  const niceHat = combat.nice_hat_bonus || 0;
+  const baseSt = (combat.monster_strength || 0) - abilityMod - niceHat;
   lines.push(`Base: ${baseSt}`);
   for (const line of (combat.ability_breakdown || [])) {
     const t = line.trim();
