@@ -271,7 +271,14 @@ def api_equip_from_pack():
                     if player.pack_slots_used - 1 >= player.pack_size:
                         return jsonify({"error": "Pack is full — can't swap to pack"}), 400
                     player.unequip(displaced)
-                    player.add_to_pack(displaced)
+                    # Insert displaced item at the same pack slot the dragged
+                    # item came from so the swap feels natural.
+                    player.pack.pop(pack_index)
+                    player.pack.insert(pack_index, displaced)
+                    player.equip(item)
+                    from werblers_engine import effects as _fx
+                    _fx.refresh_tokens(player)
+                    return jsonify({"ok": True, "state": _build_state()})
                 else:
                     player.unequip(displaced)
         if not player.can_equip(item):
@@ -325,15 +332,15 @@ def api_manage_item():
         if source == "pack":
             return jsonify({"error": "Already in pack"}), 400
         discard_pack_idx = data.get("discard_pack_index")
-        if player.pack_slots_free <= 0:
-            if discard_pack_idx is not None:
-                dpi = int(discard_pack_idx)
-                if 0 <= dpi < len(player.pack):
-                    player.pack.pop(dpi)
-                else:
-                    return jsonify({"error": "Invalid pack discard index"}), 400
+        if discard_pack_idx is not None:
+            # User explicitly chose a slot to replace
+            dpi = int(discard_pack_idx)
+            if 0 <= dpi < len(player.pack):
+                player.pack.pop(dpi)
             else:
-                return jsonify({"error": "pack_full", "pack": [_ser_item(i) for i in player.pack]}), 409
+                return jsonify({"error": "Invalid pack discard index"}), 400
+        elif player.pack_slots_free <= 0:
+            return jsonify({"error": "pack_full", "pack": [_ser_item(i) for i in player.pack]}), 409
         player.unequip(item)
         player.pack.append(item)
         from werblers_engine import effects as _fx
@@ -751,6 +758,43 @@ def api_fight():
     phase = "summoned_done" if result.get("summoned_monster") else "done"
     return jsonify({"phase": phase, "state": _build_state(), "combat_info": combat_info})
 
+@app.route("/api/use_eight_lives", methods=["POST"])
+def api_use_eight_lives():
+    """Immediately use Eight Lives to remove a curse."""
+    global _last_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    data: dict = request.get_json(force=True) or {}
+    curse_index = int(data.get("curse_index", 0))
+    result = _game.use_eight_lives(curse_index)
+    if result.get("log"):
+        _last_log = _last_log + result["log"]
+    return jsonify({"ok": result["ok"], "state": _build_state()})
+
+@app.route("/api/place_trait_item", methods=["POST"])
+def api_place_trait_item():
+    """Place a pending trait item (received from a trait like Ball and Chain).
+
+    JSON body:
+        placement_choices : same placement dict as resolve_offer uses
+    """
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    data: dict = request.get_json(force=True) or {}
+    player = _game.current_player
+    if not player.pending_trait_items:
+        return jsonify({"error": "No pending trait items"}), 400
+    item = player.pending_trait_items.pop(0)
+    choices = data.get("placement_choices", {})
+    log: list[str] = []
+    if choices.get("discard"):
+        log.append(f"  {item.name} discarded.")
+    else:
+        _game._apply_item_to_player(player, item, choices, log)
+    from werblers_engine import effects as _fx
+    _fx.refresh_tokens(player)
+    return jsonify({"ok": True, "state": _build_state(), "log": log})
+
 @app.route("/api/release_monster", methods=["POST"])
 def api_release_monster():
     """Release a captured monster from the player's pack."""
@@ -796,9 +840,11 @@ def api_summon_monster():
         "ill_come_in_again_available": has_reroll,
         "summoned_monster": True,
     }
+    _male_bonus = monster.bonus_vs_male if (monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
     combat_info = {
         "monster_name": monster.name,
-        "monster_strength": monster.strength,
+        "monster_strength": monster.strength + _male_bonus,
+        "monster_bonus_vs_male": _male_bonus,
         "player_strength": player.combat_strength(),
         "player_id": player.player_id,
         "player_name": player.name,
@@ -1076,6 +1122,7 @@ def _build_state() -> dict:
             "movement_deck_cards":    g.movement_decks[p.player_id].peek_all(),
             "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
             "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
+            "pending_trait_items":    [_ser_item(i) for i in p.pending_trait_items],
         })
     return {
         "turn_number":       g.turn_number,

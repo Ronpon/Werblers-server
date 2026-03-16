@@ -327,7 +327,11 @@ function updatePlayerStats(state) {
       const clickCls  = canUseOverworld ? ' consumable-clickable' : '';
       return `<div class="stat-item has-card-preview${clickCls}"${imgAttr}${clickAttr}>🧪 ${c.name}</div>`;
     }),
-    ...p.captured_monsters.map(m => `<div class="stat-item has-card-preview" data-card-image="/images/${m.card_image}">🐾 ${m.name}</div>`),
+    ...p.captured_monsters.map((m, i) => {
+      const clickAttr = canUseOverworld ? ` onclick="summonCapturedMonster(${i})" title="Click to summon and fight"` : '';
+      const clickCls  = canUseOverworld ? ' consumable-clickable' : '';
+      return `<div class="stat-item has-card-preview${clickCls}" data-card-image="/images/${m.card_image}"${clickAttr}>🐾 ${m.name} (captured)</div>`;
+    }),
   ];
   const used = p.pack.length + p.consumables.length + p.captured_monsters.length;
   if (used > 0) sections.push(statGroup(`Pack (${used}/${p.pack_size})`, packRows.join('')));
@@ -473,6 +477,21 @@ function renderAbilityPanel() {
     } else if (ab.type === 'select_player_minion') {
       const opts = ab.targets.map(t => `<option value="${t.player_id}">${t.name}</option>`).join('');
       row.innerHTML = buildCheckRow(`<select class="ability-select" data-id="${ab.id}" data-field="target_player_id" onchange="onAbilitySelectField(this)">${opts}</select>`);
+    } else if (ab.type === 'instant_select_curse') {
+      const curses = ab.curses || [];
+      if (curses.length === 1) {
+        row.innerHTML = `
+          <div class="ability-desc">${ab.description}</div>
+          <button class="btn-primary ability-instant-btn" onclick="useEightLives(0)">Use: Remove "${curses[0]}"</button>`;
+      } else {
+        const opts = curses.map((c, i) => `<option value="${i}">${c}</option>`).join('');
+        row.innerHTML = `
+          <div class="ability-desc">${ab.description}</div>
+          <div class="ability-instant-row">
+            <select class="ability-select" id="eight-lives-curse-select">${opts}</select>
+            <button class="btn-primary ability-instant-btn" onclick="useEightLives(parseInt(document.getElementById('eight-lives-curse-select').value))">Use Eight Lives</button>
+          </div>`;
+      }
     }
     container.appendChild(row);
   }
@@ -501,6 +520,16 @@ function onAbilitySelectField(el) {
   if (abilityChoices[id] && typeof abilityChoices[id] === 'object') {
     abilityChoices[id][field] = val;
   }
+}
+async function useEightLives(curseIndex) {
+  const resp = await fetch('/api/use_eight_lives', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ curse_index: curseIndex }),
+  });
+  const data = await resp.json();
+  if (data.state) { gameState = data.state; applyState(data.state); }
+  await loadAndRenderAbilities();
 }
 // ================================================================ MOVEMENT SECTION
 function updateMovementSection(state) {
@@ -534,6 +563,8 @@ function updateMovementHand(state) {
     handDiv.innerHTML = '<div class="hand-empty">No cards in hand.</div>';
     return;
   }
+  const hasYerAHare = currentPlayer && currentPlayer.curses &&
+      currentPlayer.curses.some(c => c.effect_id === 'yer_a_hare');
   hand.forEach((val, idx) => {
     const dispVal = val + heroBonus;
     const imgVal = Math.min(Math.max(dispVal, 1), 5);
@@ -541,9 +572,25 @@ function updateMovementHand(state) {
     card.className = 'mv-card';
     card.title = `Move ${dispVal} tile${dispVal !== 1 ? 's' : ''} forward or backward`;
     card.innerHTML = `<img class="mv-card-img" src="/images/Movement/Movement Card ${imgVal}.png" alt="${dispVal}">`;
+    // Yer a Hare asterisk on 5s
+    if (hasYerAHare && val === 5) {
+      const ast = document.createElement('span');
+      ast.className = 'mv-hare-asterisk';
+      ast.textContent = '*';
+      ast.title = "Yer a Hare, Wizard!: treated as 1";
+      card.appendChild(ast);
+    }
     card.addEventListener('click', () => promptDirection(idx, dispVal));
     handDiv.appendChild(card);
   });
+  // Yer a Hare indicator
+  if (hasYerAHare) {
+    const hareNote = document.createElement('div');
+    hareNote.className = 'mv-curse-badge mv-hare-note';
+    hareNote.title = "Yer a Hare, Wizard!: 5 movement cards are treated as 1";
+    hareNote.innerHTML = "*5's treated as 1's <span style=\"font-size:9px\">(Yer a Hare, Wizard)</span>";
+    handDiv.prepend(hareNote);
+  }
   // Botched Circumcision indicator
   if (currentPlayer && currentPlayer.curses &&
       currentPlayer.curses.some(c => c.effect_id === 'botched_circumcision')) {
@@ -960,31 +1007,35 @@ function _attachDragDrop(container) {
         body: JSON.stringify({ pack_index: packIdx, to_pack: true }),
       });
       const data = await resp.json();
-      if (data.ok) { gameState = data.state; renderAll(); }
+      if (data.ok) { gameState = data.state; applyState(data.state); renderPlayerSheetFull(data.state); }
       else { console.warn(data.error || 'Cannot equip here'); }
     });
   });
 
-  // Pack grid as drop target for equipped items
-  const packGrid = container.querySelector('.ps-pack-grid');
-  if (packGrid) {
-    packGrid.addEventListener('dragover', e => {
+  // Individual pack slots as drop targets for equipped items (equip→pack)
+  container.querySelectorAll('.ps-pack-grid .ps-slot').forEach(slotEl => {
+    slotEl.addEventListener('dragover', e => {
+      // Accept drops from equip slots only
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      packGrid.classList.add('ps-drag-over');
+      slotEl.classList.add('ps-drag-over');
     });
-    packGrid.addEventListener('dragleave', e => {
-      if (!packGrid.contains(e.relatedTarget)) packGrid.classList.remove('ps-drag-over');
-    });
-    packGrid.addEventListener('drop', async e => {
+    slotEl.addEventListener('dragleave', () => slotEl.classList.remove('ps-drag-over'));
+    slotEl.addEventListener('drop', async e => {
       e.preventDefault();
-      packGrid.classList.remove('ps-drag-over');
+      slotEl.classList.remove('ps-drag-over');
       let info;
       try { info = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (_) { return; }
       if (info.ctx !== 'equip') return;
-      await manageItem('to_pack', info.slotKey, parseInt(info.slotIdx, 10));
+      // If dropping onto a filled pack slot, pass its index as discard_pack_index
+      const targetPackIdx = slotEl.dataset.packIdx;
+      const extra = {};
+      if (targetPackIdx !== undefined && targetPackIdx !== '' && parseInt(targetPackIdx, 10) >= 0) {
+        extra.discard_pack_index = parseInt(targetPackIdx, 10);
+      }
+      await manageItem('to_pack', info.slotKey, parseInt(info.slotIdx, 10), extra);
     });
-  }
+  });
 }
 
 async function manageItem(action, source, idx, extraParams) {
@@ -1002,6 +1053,7 @@ async function manageItem(action, source, idx, extraParams) {
   }
   if (data.ok && data.state) {
     gameState = data.state;
+    applyState(data.state);
     renderPlayerSheetFull(gameState);
     await loadAndRenderAbilities();
   } else if (data.error) {
@@ -1273,8 +1325,8 @@ function showRakeItInModal(data) {
   } else if (subType === 'chest') {
     shopHtml = `<div class="rake-section-label">Bonus:</div>
     <div class="rake-items-row">
-      <div class="rake-equip-btn rake-draw-item">
-        <div class="rake-draw-icon">?</div>
+      <div class="rake-equip-btn rake-draw-item rake-selected" data-shop-idx="0" onclick="rakeSelectShopItem(0,this)">
+        <img class="rake-item-thumb" src="/images/Cards/Card back brown.png" alt="Draw Item" style="image-rendering:smooth">
         <div class="rake-item-name">Draw Item</div>
       </div>
     </div>`;
@@ -1343,14 +1395,19 @@ async function resolveRakeItIn(useIt) {
   if (data.bonus_item) {
     const bi = data.bonus_item;
     const img = bi.card_image ? `<img class="consumable-modal-card-img" src="/images/${bi.card_image}" alt="${bi.name}" onclick="zoomCard(this.src)">` : '';
-    _showConsumableResultModal({
-      title: '🎁 Rake It In! Bonus Item',
-      monsterName: '',
-      monsterImg: '',
-      resultName: bi.name,
-      resultDesc: `+${bi.strength_bonus} Str — added to your pack.`,
-      resultClass: 'result-trait',
+    await new Promise(resolve => {
+      _showConsumableResultModal({
+        title: '🎁 Rake It In! Bonus Item',
+        monsterName: '',
+        monsterImg: '',
+        resultName: bi.name,
+        resultDesc: `+${bi.strength_bonus} Str`,
+        resultClass: 'result-trait',
+        onClose: resolve,
+      });
     });
+    // Place the bonus item via the pending trait items flow
+    await _placePendingTraitItems();
   }
   await loadAndRenderAbilities();
 }
@@ -1457,13 +1514,71 @@ let _preFightCombat = null;
 
 function showPreFightScene(combat, state) {
   _preFightCombat = combat;
-  // If there are nearby bystanders who can use consumables, show their screens first
-  const queue = combat.nearby_queue || [];
-  if (queue.length > 0) {
-    _renderBystanderScreen(queue[0], combat, state);
-  } else {
-    _renderPreFightScene(combat, state);
-  }
+  // Show cinematic intro first, then proceed to bystanders or pre-fight
+  _showFightIntro(combat, state, () => {
+    const queue = combat.nearby_queue || [];
+    if (queue.length > 0) {
+      _renderBystanderScreen(queue[0], combat, state);
+    } else {
+      _renderPreFightScene(combat, state);
+    }
+  });
+}
+
+// ---------------------------------------------------------------- CINEMATIC FIGHT INTRO
+
+function _showFightIntro(combat, state, onContinue) {
+  const overlay = document.getElementById('battle-overlay');
+  const p = state.players.find(x => x.player_id === combat.player_id) || state.players[0];
+  const heroImg = combat.hero_card_image ? `/images/${combat.hero_card_image}` : (p && p.hero_card_image ? `/images/${p.hero_card_image}` : '');
+  const playerName = combat.player_name || (p ? p.name : '');
+  const monsterImg = combat.card_image ? `/images/${combat.card_image}` : '';
+  const bg = combat.background ? `/images/${combat.background}` : '';
+
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div class="fight-intro-content">
+      <div class="fight-intro-hero fight-intro-offscreen-left">
+        <div class="fight-intro-name fight-intro-hero-name">${playerName}</div>
+        ${heroImg ? `<img class="fight-intro-card" src="${heroImg}" alt="${playerName}">` : ''}
+      </div>
+      <div class="fight-intro-vs fight-intro-offscreen-top">VS</div>
+      <div class="fight-intro-monster fight-intro-offscreen-right">
+        <div class="fight-intro-name fight-intro-monster-name">${combat.monster_name}</div>
+        ${monsterImg ? `<img class="fight-intro-card" src="${monsterImg}" alt="${combat.monster_name}">` : ''}
+      </div>
+      <div class="fight-intro-continue" id="fight-intro-continue">
+        <button class="btn-primary" id="fight-intro-btn">Continue</button>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+
+  const heroEl = overlay.querySelector('.fight-intro-hero');
+  const vsEl = overlay.querySelector('.fight-intro-vs');
+  const monsterEl = overlay.querySelector('.fight-intro-monster');
+  const continueBtn = overlay.querySelector('#fight-intro-btn');
+
+  // Beat 1: Hero flies in from bottom-left
+  requestAnimationFrame(() => {
+    heroEl.classList.remove('fight-intro-offscreen-left');
+    heroEl.classList.add('fight-intro-animate-in');
+  });
+
+  // Beat 2: VS flies in from top
+  setTimeout(() => {
+    vsEl.classList.remove('fight-intro-offscreen-top');
+    vsEl.classList.add('fight-intro-animate-in');
+  }, 1300);
+
+  // Beat 3: Monster flies in from bottom-right
+  setTimeout(() => {
+    monsterEl.classList.remove('fight-intro-offscreen-right');
+    monsterEl.classList.add('fight-intro-animate-in');
+  }, 2600);
+
+  continueBtn.addEventListener('click', () => {
+    onContinue();
+  });
 }
 
 // ---------------------------------------------------------------- BYSTANDER CONSUMABLE SCREEN
@@ -1886,12 +2001,20 @@ function _showConsumableModal(consumable, bodyHtml, buttons) {
   el.classList.remove('hidden');
 }
 
+let _consumableModalOnClose = null;
+
 function _closeConsumableModal() {
   const el = _getConsumableModal();
   el.classList.add('hidden');
+  if (_consumableModalOnClose) {
+    const cb = _consumableModalOnClose;
+    _consumableModalOnClose = null;
+    cb();
+  }
 }
 
-function _showConsumableResultModal({ title, monsterName, monsterImg, resultName, resultDesc, resultClass }) {
+function _showConsumableResultModal({ title, monsterName, monsterImg, resultName, resultDesc, resultClass, onClose }) {
+  _consumableModalOnClose = onClose || null;
   const el = _getConsumableModal();
   const mImg = monsterImg ? `<img class="consumable-modal-card-img" src="${monsterImg}" alt="${monsterName}" onclick="zoomCard(this.src)">` : '';
   el.innerHTML = `<div class="consumable-modal-box">
@@ -2038,7 +2161,44 @@ function showGainModal(combat) {
 
 async function closeGainModal() {
   document.getElementById('gain-modal').classList.add('hidden');
+  // Check for pending trait items (items received from traits that need placement)
+  await _placePendingTraitItems();
   await _finishBattleContinue();
+}
+
+async function _placePendingTraitItems() {
+  if (!gameState) return;
+  const p = gameState.players.find(x => x.player_id === viewingPlayerId);
+  if (!p || !p.pending_trait_items || !p.pending_trait_items.length) return;
+  for (let i = 0; i < p.pending_trait_items.length; i++) {
+    const item = p.pending_trait_items[i];
+    // Show "Received" popup
+    await new Promise(resolve => {
+      const img = item.card_image ? `<img class="consumable-modal-card-img" src="/images/${item.card_image}" alt="${item.name}" onclick="zoomCard(this.src)">` : '';
+      _showConsumableResultModal({
+        title: 'Received!',
+        monsterName: '',
+        monsterImg: '',
+        resultName: item.name,
+        resultDesc: `+${item.strength_bonus} Str (${item.slot})`,
+        resultClass: 'result-trait',
+        onClose: resolve,
+      });
+    });
+    // Open placement screen
+    await new Promise(resolve => {
+      showInventoryPopup(item, async (choices) => {
+        const resp = await fetch('/api/place_trait_item', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ placement_choices: choices }),
+        });
+        const data = await resp.json();
+        if (data.state) { gameState = data.state; applyState(data.state); }
+        resolve();
+      });
+    });
+  }
 }
 
 async function _finishBattleContinue() {
@@ -2473,9 +2633,10 @@ function openDeckViewer(pile) {
     cards = p.movement_discard_list || [];
     title = `Movement Discard (${cards.length} cards)`;
   }
-  const grid = cards.map(v =>
-    `<div class="mv-card mv-card-small"><div class="mv-card-number">${v}</div><div class="mv-card-label">MOVE</div></div>`
-  ).join('') || '<div class="dv-empty">Empty</div>';
+  const grid = cards.map(v => {
+    const imgVal = Math.min(Math.max(v, 1), 5);
+    return `<div class="mv-card mv-card-small"><img class="mv-card-img" src="/images/Movement/Movement Card ${imgVal}.png" alt="${v}"></div>`;
+  }).join('') || '<div class="dv-empty">Empty</div>';
   document.getElementById('deck-viewer-title').textContent = title;
   document.getElementById('deck-viewer-grid').innerHTML = grid;
   document.getElementById('deck-viewer-modal').classList.remove('hidden');
@@ -2643,8 +2804,10 @@ function _monsterStrBreakdownTitle(combat) {
   // Derive base from total minus modifiers
   const abilityMod = combat.ability_monster_mod || 0;
   const niceHat = combat.nice_hat_bonus || 0;
-  const baseSt = (combat.monster_strength || 0) - abilityMod - niceHat;
+  const maleBon = combat.monster_bonus_vs_male || 0;
+  const baseSt = (combat.monster_strength || 0) - abilityMod - niceHat - maleBon;
   lines.push(`Base: ${baseSt}`);
+  if (maleBon) lines.push(`+${maleBon} vs Men`);
   for (const line of (combat.ability_breakdown || [])) {
     const t = line.trim();
     if (t) lines.push(t);
@@ -2658,10 +2821,15 @@ function _strBreakdownTitle(combat) {
   const base = combat.player_base_strength;
   if (base !== undefined) lines.push(`Base: ${base}`);
   for (const item of (combat.player_gear || [])) {
+    const parts = [];
     if (item.strength_bonus) {
       const s = item.strength_bonus >= 0 ? `+${item.strength_bonus}` : `${item.strength_bonus}`;
-      lines.push(`${item.name}: ${s}`);
+      parts.push(s);
     }
+    if (item.tokens) {
+      parts.push(`+${item.tokens} ability`);
+    }
+    if (parts.length) lines.push(`${item.name}: ${parts.join(', ')}`);
   }
   for (const t of (combat.player_traits || [])) {
     if (t.tokens) lines.push(`${t.name}: +${t.tokens}`);

@@ -99,6 +99,7 @@ class Monster:
     bonus_text: str = ""          # special bonus condition
     active: bool = True           # False = no card yet; excluded from game decks
     effect_id: str = ""           # hook identifier for boss-specific combat modifiers
+    bonus_vs_male: int = 0         # extra strength when fighting a male hero
 
 
 @dataclass

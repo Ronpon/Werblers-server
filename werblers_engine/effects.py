@@ -272,7 +272,7 @@ def modify_movement_value(
     # --- Phase 1: value overrides ---
     for curse in player.curses:
         eid = curse.effect_id
-        if eid == "yer_a_hare" and card_value == 6:
+        if eid == "yer_a_hare" and card_value == 5:
             value = 1
         elif eid == "eughghghghgh":
             if len(player.curses) > len(player.traits) and card_value == 1:
@@ -323,32 +323,30 @@ def hand_size_cap(player: Player) -> int | None:
 # ON-GAIN: TRAIT
 # ===================================================================
 
-def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> None:
-    """Apply one-time effects when a trait is first acquired."""
+def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> list[Item]:
+    """Apply one-time effects when a trait is first acquired.
+
+    Returns a list of Item objects that need manual placement by the player
+    (i.e. items received from traits that should go through the normal
+    "choose where to put it" flow).
+    """
     eid = trait.effect_id
+    pending_items: list[Item] = []
 
     if eid == "ball_and_chain":
         item = Item("Ball and Chain", EquipSlot.WEAPON, strength_bonus=7)
-        if player.equip(item):
-            log.append("  Ball and Chain: received +7 weapon — equipped!")
-        else:
-            log.append("  Ball and Chain: received +7 weapon — no slot, discarded.")
+        pending_items.append(item)
+        log.append("  Ball and Chain: received Ball and Chain (+7 weapon)!")
 
     elif eid == "birdie":
         item = Item("Power Driver", EquipSlot.WEAPON, strength_bonus=10, hands=2)
-        if player.equip(item):
-            log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon) — equipped!")
-        else:
-            log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon) — no slot, discarded.")
+        pending_items.append(item)
+        log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon)!")
 
     elif eid == "kapwing":
         item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=8)
-        if player.equip(item):
-            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — equipped!")
-        elif player.add_to_pack(item):
-            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — chest slot full, added to pack.")
-        else:
-            log.append("  Kapwing!: received Bulletproof Vest (+8 chest) — no slot and pack full, discarded.")
+        pending_items.append(item)
+        log.append("  Kapwing!: received Bulletproof Vest (+8 chest)!")
 
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)
@@ -422,6 +420,7 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> None:
         log.append("  Immunized: the next curse you receive will be negated!")
 
     refresh_tokens(player)
+    return pending_items
 
 
 # ===================================================================

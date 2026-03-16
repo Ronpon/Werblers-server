@@ -27,6 +27,10 @@ def resolve_combat(
     ps = player.combat_strength(use_consumables=use_consumables, is_night=is_night) + extra_strength
     ms = monster.strength
 
+    # Monster bonus vs male heroes (e.g. Penis Fly Trap: +3 vs men)
+    if monster.bonus_vs_male and player.hero and player.hero.is_male:
+        ms += monster.bonus_vs_male
+
     if ps > ms:
         return CombatResult.WIN
     if ps < ms:

@@ -74,6 +74,9 @@ class Player:
     # Gregory: Contagious Mutagen once-per-game tracker
     mutagen_used: bool = False
 
+    # Items received from traits that need manual placement by the player
+    pending_trait_items: list[Item] = field(default_factory=list)
+
     # ------------------------------------------------------------------
     # Hero assignment
     # ------------------------------------------------------------------
@@ -295,3 +298,22 @@ class Player:
             return False
         self.captured_monsters.append(m)
         return True
+
+    def evict_pack_slot(self, unified_idx: int) -> Optional[str]:
+        """Remove the item at *unified_idx* (pack ++ consumables ++ captured).
+
+        Returns the evicted item's name, or ``None`` when the index is out
+        of range.  The unified ordering matches the frontend pack grid.
+        """
+        np = len(self.pack)
+        nc = len(self.consumables)
+        nm = len(self.captured_monsters)
+        if unified_idx < 0 or unified_idx >= np + nc + nm:
+            return None
+        if unified_idx < np:
+            return self.pack.pop(unified_idx).name
+        unified_idx -= np
+        if unified_idx < nc:
+            return self.consumables.pop(unified_idx).name
+        unified_idx -= nc
+        return self.captured_monsters.pop(unified_idx).name

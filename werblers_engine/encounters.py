@@ -334,7 +334,8 @@ def _apply_consumable_effect(
                 return False
             player.traits.append(trait)
             log.append(f"  {player.name} gained trait '{trait.name}'.")
-            _fx.on_trait_gained(player, trait, log)
+            trait_items = _fx.on_trait_gained(player, trait, log)
+            player.pending_trait_items.extend(trait_items)
             _fx.refresh_tokens(player)
 
     elif eid == "capture_monster":
@@ -514,7 +515,8 @@ def encounter_monster(
                     f"  Face Mask: auto-win vs Coronavirus! +5 Str tokens on Face Mask "
                     f"(total: +{face_mask_item.tokens}). Gained trait: {trait.name}"
                 )
-                _fx.on_trait_gained(player, trait, log)
+                trait_items = _fx.on_trait_gained(player, trait, log)
+                player.pending_trait_items.extend(trait_items)
             else:
                 log.append(
                     f"  Face Mask: auto-win vs Coronavirus! +5 Str tokens on Face Mask "
@@ -612,7 +614,8 @@ def encounter_monster(
             if trait:
                 player.traits.append(trait)
                 log.append(f"  Victory! Gained trait: {trait.name}")
-                _fx.on_trait_gained(player, trait, log)
+                trait_items = _fx.on_trait_gained(player, trait, log)
+                player.pending_trait_items.extend(trait_items)
             else:
                 log.append("  Victory! (no traits left in deck)")
         elif result == CombatResult.LOSE:
@@ -638,7 +641,8 @@ def encounter_monster(
                     if trait:
                         player.traits.append(trait)
                         log.append(f"  It's Not Your Fault!: gained trait {trait.name} instead of curse!")
-                        _fx.on_trait_gained(player, trait, log)
+                        trait_items = _fx.on_trait_gained(player, trait, log)
+                        player.pending_trait_items.extend(trait_items)
                     else:
                         log.append("  It's Not Your Fault!: no trait available.")
                     skip_curse = True

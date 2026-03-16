@@ -809,12 +809,23 @@ class Game:
         for trait in player.traits:
             eid = trait.effect_id
             if eid == "eight_lives" and player.curses:
-                abilities.append({
-                    "id": "eight_lives",
-                    "label": "Eight Lives",
-                    "description": "Discard this trait to remove one of your Tier 1 or 2 curses.",
-                    "type": "toggle",
-                })
+                removable_curses = [
+                    c for c in player.curses
+                    if not c.source_monster
+                    or any(
+                        m.name == c.source_monster and m.level in (1, 2)
+                        for pool in (C.MONSTER_POOL_L1, C.MONSTER_POOL_L2)
+                        for m in pool
+                    )
+                ]
+                if removable_curses:
+                    abilities.append({
+                        "id": "eight_lives",
+                        "label": "Eight Lives",
+                        "description": "Discard this trait to remove one of your Tier 1 or 2 curses.",
+                        "type": "instant_select_curse",
+                        "curses": [c.name for c in removable_curses],
+                    })
             elif eid == "meat_on_menu":
                 targets = [p for p in self.players if p is not player and p.minions]
                 if targets:
@@ -953,29 +964,7 @@ class Game:
                 trait.strength_bonus += 1
                 log.append(f"  Residuals: +1 Str token (total: +{trait.strength_bonus})")
 
-        # 3. Eight Lives
-        if activated.get("eight_lives"):
-            eight_lives = next(
-                (t for t in player.traits if t.effect_id == "eight_lives"), None
-            )
-            removable = [
-                c for c in player.curses
-                if not c.source_monster
-                or any(
-                    m.name == c.source_monster and m.level in (1, 2)
-                    for pool in (C.MONSTER_POOL_L1, C.MONSTER_POOL_L2)
-                    for m in pool
-                )
-            ]
-            if eight_lives and removable:
-                removed = removable[0]
-                player.curses.remove(removed)
-                player.traits.remove(eight_lives)
-                _fx.on_trait_lost(player, eight_lives, log)
-                _fx.refresh_tokens(player)
-                log.append(
-                    f"  Eight Lives: discarded trait, removed curse '{removed.name}'!"
-                )
+        # 3. Eight Lives — now handled by use_eight_lives() via API
 
         # 4. Meat's Back on Menu
         meat_args = activated.get("meat_on_menu")
@@ -1296,9 +1285,11 @@ class Game:
                 "ill_come_in_again_count": reroll_count,
                 "ill_come_in_again_available": reroll_count > 0,
             }
+            _male_bonus = monster.bonus_vs_male if (monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
             combat_info = {
                 "monster_name": monster.name,
-                "monster_strength": monster.strength,
+                "monster_strength": monster.strength + _male_bonus,
+                "monster_bonus_vs_male": _male_bonus,
                 "player_strength": player.combat_strength(),
                 "player_id": player.player_id,
                 "player_name": player.name,
@@ -1511,9 +1502,11 @@ class Game:
         reroll_traits = [t for t in player.traits if t.effect_id in ("ill_come_in_again", "i_see_everything")]
         trait_name = reroll_traits[0].name if reroll_traits else "I'll Come In Again!"
         log.append(f"  {trait_name}: sent {monster.name} back, drew {new_monster.name}.")
+        _male_bonus3 = new_monster.bonus_vs_male if (new_monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
         combat_info = {
             "monster_name": new_monster.name,
-            "monster_strength": new_monster.strength,
+            "monster_strength": new_monster.strength + _male_bonus3,
+            "monster_bonus_vs_male": _male_bonus3,
             "player_strength": player.combat_strength(),
             "player_id": player.player_id,
             "player_name": player.name,
@@ -1652,9 +1645,11 @@ class Game:
                 pre_drawn_monster=monster,
                 extra_player_strength=extra_str,
             )
+            _male_bonus2 = monster.bonus_vs_male if (monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
             self._last_combat_info = {
                 "monster_name": monster.name,
-                "monster_strength": monster.strength,
+                "monster_strength": monster.strength + _male_bonus2,
+                "monster_bonus_vs_male": _male_bonus2,
                 "player_strength": player_str_at_fight,
                 "player_id": player.player_id,
                 "player_name": player.name,
@@ -1905,6 +1900,38 @@ class Game:
             "combat_result": None, "game_status": self.status.name, "winner": self.winner,
         }
 
+    def use_eight_lives(self, curse_index: int = 0) -> dict:
+        """Immediately use the Eight Lives trait to remove a curse.
+
+        Returns {"ok": True, "log": [...]} on success.
+        """
+        player = self.current_player
+        eight_lives = next(
+            (t for t in player.traits if t.effect_id == "eight_lives"), None
+        )
+        if not eight_lives:
+            return {"ok": False, "log": ["No Eight Lives trait."]}
+        removable = [
+            c for c in player.curses
+            if not c.source_monster
+            or any(
+                m.name == c.source_monster and m.level in (1, 2)
+                for pool in (C.MONSTER_POOL_L1, C.MONSTER_POOL_L2)
+                for m in pool
+            )
+        ]
+        if not removable:
+            return {"ok": False, "log": ["No removable curses."]}
+        idx = max(0, min(curse_index, len(removable) - 1))
+        removed = removable[idx]
+        player.curses.remove(removed)
+        player.traits.remove(eight_lives)
+        log: list[str] = []
+        _fx.on_trait_lost(player, eight_lives, log)
+        _fx.refresh_tokens(player)
+        log.append(f"  Eight Lives: discarded trait, removed curse '{removed.name}'!")
+        return {"ok": True, "log": log}
+
     def resolve_rake_it_in(
         self,
         use_it: bool,
@@ -1962,14 +1989,14 @@ class Game:
 
         if use_it:
             if sub_type == "chest":
-                # Draw a random bonus item from the tier deck
+                # Draw a random bonus item from the tier deck — player chooses placement
                 bonus = self.item_decks[level].draw()
                 if bonus is not None:
-                    self._apply_item_to_player(player, bonus, placement_choices or {}, log)
-                    log.append(f"  Rake It In!: bonus item \u2014 {bonus.name}!")
+                    player.pending_trait_items.append(bonus)
+                    log.append(f"  Rake It In!: bonus item — {bonus.name}!")
                     bonus_item_info = _item_to_dict(bonus)
                 else:
-                    log.append("  Rake It In!: item deck empty \u2014 no bonus draw.")
+                    log.append("  Rake It In!: item deck empty — no bonus draw.")
             elif sub_type == "shop":
                 remaining: list[Item] = pending.get("shop_remaining", [])
                 if remaining and 0 <= second_item_choice < len(remaining):
@@ -2011,7 +2038,16 @@ class Game:
                 if player.add_consumable_to_pack(_copy.copy(consumable)):
                     log.append(f"  {item.name} added to consumables.")
                 else:
-                    log.append(f"  {item.name} (consumable) — pack full, discarded.")
+                    # Pack full — evict the chosen slot
+                    discard_idx = int(choices.get("pack_discard_index", -1))
+                    if discard_idx >= 0:
+                        evicted_name = player.evict_pack_slot(discard_idx)
+                        if evicted_name:
+                            log.append(f"  {evicted_name} discarded from pack.")
+                        player.consumables.append(_copy.copy(consumable))
+                        log.append(f"  {item.name} added to consumables.")
+                    else:
+                        log.append(f"  {item.name} (consumable) — pack full, discarded.")
             else:
                 log.append(f"  {item.name} (consumable) — unknown type, discarded.")
             return
@@ -2057,12 +2093,10 @@ class Game:
                                 f"  {current.name} moved to pack. {item.name} equipped."
                             )
                         else:
-                            pack_idx = min(
-                                int(choices.get("pack_discard_index", 0)),
-                                len(player.pack) - 1,
-                            )
-                            evicted = player.pack.pop(pack_idx)
-                            log.append(f"  Pack full \u2014 {evicted.name} discarded.")
+                            discard_idx = int(choices.get("pack_discard_index", 0))
+                            evicted_name = player.evict_pack_slot(discard_idx)
+                            if evicted_name:
+                                log.append(f"  Pack full — {evicted_name} discarded.")
                             player.unequip(current)
                             player.pack.append(current)
                             player.equip(item)
@@ -2077,13 +2111,12 @@ class Game:
             if player.add_to_pack(item):
                 log.append(f"  {item.name} added to pack.")
             else:
-                pack_idx = min(
-                    int(choices.get("pack_discard_index", 0)),
-                    len(player.pack) - 1,
-                )
-                evicted = player.pack.pop(pack_idx)
+                discard_idx = int(choices.get("pack_discard_index", 0))
+                evicted_name = player.evict_pack_slot(discard_idx)
+                if evicted_name:
+                    log.append(f"  {evicted_name} discarded from pack.")
                 player.pack.append(item)
-                log.append(f"  {evicted.name} discarded from pack. {item.name} added.")
+                log.append(f"  {item.name} added to pack.")
 
         _fx.refresh_tokens(player)
 

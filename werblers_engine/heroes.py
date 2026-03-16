@@ -57,6 +57,7 @@ class Hero:
     has_skimpy_armour: bool = False        # Brunhilde = True
     has_night_stalker: bool = False        # Rizzt = True
     night_stalker_bonus: int = 0           # Rizzt = 3
+    is_male: bool = True                   # False for Brunhilde
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +103,7 @@ HEROES: dict[HeroId, Hero] = {
         description="A busty and beautiful blonde barbarian.",
         has_luscious_locks=True,
         has_skimpy_armour=True,
+        is_male=False,
     ),
     HeroId.RIZZT: Hero(
         id=HeroId.RIZZT,
