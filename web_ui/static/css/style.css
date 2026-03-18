@@ -2947,6 +2947,20 @@ body {
   border: 1px solid var(--border);
 }
 .mystery-fs-body { margin-top: 12px; }
+.mystery-speech-bubble {
+  background: rgba(30, 26, 22, 0.85);
+  border: 2px solid var(--gold);
+  border-radius: 16px;
+  padding: 14px 20px;
+  margin: 14px auto;
+  max-width: 400px;
+  text-align: center;
+  color: var(--gold-light);
+  font-family: 'Cinzel', serif;
+  font-size: 1em;
+  font-style: italic;
+  position: relative;
+}
 .mystery-info {
   color: var(--text);
   margin-bottom: 14px;

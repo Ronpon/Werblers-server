@@ -159,24 +159,25 @@ def resolve_mystery_box(
     if rng is None:
         rng = random.Random()
 
-    # Wager the item
+    # Wager the item — unified index spans pack + consumables + monsters + equipped
     np = len(player.pack)
     nc = len(player.consumables)
     nm = len(player.captured_monsters)
-    total = np + nc + nm
+    pack_total = np + nc + nm
+    all_equipped = player.helmets + player.chest_armor + player.leg_armor + player.weapons
+    total = pack_total + len(all_equipped)
     if wager_pack_index < 0 or wager_pack_index >= total:
         log.append("Mystery Box: invalid wager — no item selected.")
         return {"prize_type": "error"}
 
-    if wager_pack_index < np:
-        wagered = player.pack.pop(wager_pack_index)
-        log.append(f"Mystery Box: wagered {wagered.name}.")
-    elif wager_pack_index < np + nc:
-        wagered = player.consumables.pop(wager_pack_index - np)
-        log.append(f"Mystery Box: wagered {wagered.name} (consumable).")
+    if wager_pack_index < pack_total:
+        name = player.evict_pack_slot(wager_pack_index)
+        log.append(f"Mystery Box: wagered {name}.")
     else:
-        wagered = player.captured_monsters.pop(wager_pack_index - np - nc)
-        log.append(f"Mystery Box: wagered {wagered.name} (captured monster).")
+        equip_idx = wager_pack_index - pack_total
+        item = all_equipped[equip_idx]
+        player.unequip(item)
+        log.append(f"Mystery Box: wagered {item.name} (equipped).")
 
     prize = _roll_prize(tier, rng)
     return _materialise_prize(prize, tier, player, item_decks, monster_decks, trait_deck, log, rng)
@@ -215,15 +216,28 @@ def resolve_the_smith(
     (only used at Tier 3).
     """
     if tier < 3:
-        # Trade 3 items from pack for 1 item of tier+1
+        # Trade 3 items from pack (or equipped) for 1 item of tier+1
         if len(wager_indices) < 3:
             log.append("The Smith: need 3 items to trade.")
             return {"prize_type": "error"}
+        np = len(player.pack)
+        nc = len(player.consumables)
+        nm = len(player.captured_monsters)
+        pack_total = np + nc + nm
+        all_equipped = player.helmets + player.chest_armor + player.leg_armor + player.weapons
         names = []
+        # Process in descending order so pack indices stay valid
         for idx in sorted(wager_indices, reverse=True):
-            name = player.evict_pack_slot(idx)
-            if name:
-                names.append(name)
+            if idx < pack_total:
+                name = player.evict_pack_slot(idx)
+                if name:
+                    names.append(name)
+            else:
+                equip_idx = idx - pack_total
+                if equip_idx < len(all_equipped):
+                    item = all_equipped[equip_idx]
+                    player.unequip(item)
+                    names.append(item.name)
         log.append(f"The Smith: traded {', '.join(names)}.")
         next_tier = min(tier + 1, 3)
         reward = item_decks[next_tier].draw()

@@ -2466,7 +2466,7 @@ function renderPlayerSheetFull(state) {
         <button class="btn-secondary ps-discard-btn" onclick="_psDiscardPlacement()">Discard Item</button>
         <button class="btn-secondary" onclick="_psBackToOffer()" style="margin-left:6px">&#x2190; Back</button>
       </div>` : ''}
-      <button class="ps-close-btn" onclick="${inPlacement ? '_psBackToOffer()' : 'closePlayerSheet()'}">&#x2715; ${inPlacement ? 'Back' : 'Close'}</button>
+      ${inPlacement ? '' : '<button class="ps-close-btn" onclick="closePlayerSheet()">&#x2715; Close</button>'}
       <div class="ps-sheet-name">${p.name}</div>
       <div id="ps-layout">
         <div id="ps-left">
@@ -2935,12 +2935,16 @@ function showMysteryEventModal(event, state) {
     bodyHtml = _renderBeggar(event, player);
   }
 
+  // Wheel has its own image/desc in the body, so suppress the default ones
+  const showDesc = event.event_id !== 'the_wheel';
+  const showImg = event.event_id !== 'the_wheel';
+
   overlay.innerHTML = `
     <div class="battle-content mystery-fullscreen" ${bg ? `style="background-image:url('${bg}')"` : ''}>
       <div class="mystery-fs-inner">
         <h2 class="mystery-fs-title">${event.name}</h2>
-        <p class="mystery-fs-desc">${event.description || ''}</p>
-        ${imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
+        ${showDesc ? `<p class="mystery-fs-desc">${event.description || ''}</p>` : ''}
+        ${showImg && imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
         <div class="mystery-fs-body">${bodyHtml}</div>
       </div>
     </div>`;
@@ -2949,17 +2953,20 @@ function showMysteryEventModal(event, state) {
 
 function _renderMysteryBox(event, player) {
   const packItems = _getUnifiedPack(player);
-  if (packItems.length === 0) {
+  const equipped = _getAllEquipped(player);
+  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
+                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
+  if (allItems.length === 0) {
     return `<p class="mystery-info">You have nothing to wager!</p>
             <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
   }
-  const itemBtns = packItems.map((item, i) => {
-    const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
-    return `<div class="mystery-selectable-item" data-idx="${i}" onclick="_selectMysteryItem(${i}, this)">
+  const itemBtns = allItems.map(item => {
+    const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
+    return `<div class="mystery-selectable-item" data-idx="${item.idx}" onclick="_selectMysteryItem(${item.idx}, this)">
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
   }).join('');
-  return `<p class="mystery-info">Choose an item from your pack to wager:</p>
+  return `<p class="mystery-info">Choose an item to wager:</p>
           <div class="mystery-item-grid">${itemBtns}</div>
           <div class="mystery-btn-row">
             <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Wager Item</button>
@@ -2968,7 +2975,12 @@ function _renderMysteryBox(event, player) {
 }
 
 function _renderTheWheel(event) {
-  return `<p class="mystery-info">Spin the wheel for a free prize!</p>
+  const tier = event.tier || 1;
+  const imgSrc = `/images/Events/Wheel Tier ${tier}.png`;
+  return `<div class="mystery-speech-bubble">
+            <p>"Step right up! Spin the wheel! Win a prize <span style="font-size:0.75em;opacity:0.7">(or something else)</span>!"</p>
+          </div>
+          <img class="mystery-fs-img" src="${imgSrc}" alt="The Wheel" onerror="this.style.display='none'" style="margin:12px auto;display:block">
           <div class="mystery-btn-row">
             <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin the Wheel!</button>
           </div>`;
@@ -2977,13 +2989,16 @@ function _renderTheWheel(event) {
 function _renderTheSmith(event, player) {
   const packItems = _getUnifiedPack(player);
   if (event.tier < 3) {
-    if (packItems.length < 3) {
-      return `<p class="mystery-info">You need at least 3 pack items to trade. You have ${packItems.length}.</p>
+    const equipped = _getAllEquipped(player);
+    const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
+                      ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
+    if (allItems.length < 3) {
+      return `<p class="mystery-info">You need at least 3 items to trade. You have ${allItems.length}.</p>
               <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
     }
-    const itemBtns = packItems.map((item, i) => {
-      const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
-      return `<div class="mystery-selectable-item smith-item" data-idx="${i}" onclick="_toggleSmithItem(this)">
+    const itemBtns = allItems.map(item => {
+      const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
+      return `<div class="mystery-selectable-item smith-item" data-idx="${item.idx}" onclick="_toggleSmithItem(this)">
         ${img}<div class="mystery-item-label">${item.name}</div>
       </div>`;
     }).join('');
@@ -3147,9 +3162,21 @@ async function _postResolveMystery(body) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
-    if (!resp.ok) { console.error('resolve_mystery failed', resp.status); return; }
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      console.error('resolve_mystery failed', resp.status, errData);
+      alert(`Mystery event error: ${errData.error || resp.status}`);
+      _closeMysteryResult();
+      return;
+    }
     const data = await resp.json();
     if (data.state) { gameState = data.state; applyState(data.state); }
+
+    // For the Wheel: show farewell screen before proceeding to result
+    const isWheel = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'the_wheel';
+    if (isWheel && body.action === 'spin') {
+      await _showWheelFarewell(data);
+    }
 
     if (data.phase === 'combat') {
       playMusic('Battle Music.wav');
@@ -3158,30 +3185,39 @@ async function _postResolveMystery(body) {
       _pendingOfferData = data.offer;
       showChestModal(data.offer, {});
     } else if (data.phase === 'beggar_thank') {
-      // Beggar accepted gift — show thank you
       _showBeggarThankYou(data);
     } else if (data.phase === 'fairy_king_reveal') {
-      // 3rd gift: beggar transforms into Fairy King
       _showFairyKingReveal(data);
     } else {
-      // done / trait / nothing
-      const overlay = document.getElementById('battle-overlay');
-      const resultLabel = data.mystery_result || 'Mystery resolved!';
-      overlay.innerHTML = `
-        <div class="battle-content mystery-fullscreen">
-          <div class="mystery-fs-inner">
-            <h2 class="mystery-fs-title">Mystery Result</h2>
-            <p class="mystery-fs-desc">${resultLabel}</p>
-            <div class="mystery-btn-row">
-              <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
-            </div>
-          </div>
-        </div>`;
-      overlay.classList.remove('hidden');
+      // done / trait / nothing — just close and continue
+      _closeMysteryResult();
     }
   } catch (err) {
     console.error('resolve_mystery error:', err);
   }
+}
+
+async function _showWheelFarewell(data) {
+  const tier = _pendingMysteryEvent?.tier || 1;
+  const imgSrc = `/images/Events/Wheel Tier ${tier}.png`;
+  const overlay = document.getElementById('battle-overlay');
+  overlay.innerHTML = `
+    <div class="battle-content mystery-fullscreen">
+      <div class="mystery-fs-inner">
+        <h2 class="mystery-fs-title">The Wheel</h2>
+        <img class="mystery-fs-img" src="${imgSrc}" alt="The Wheel" onerror="this.style.display='none'" style="margin:12px auto;display:block">
+        <div class="mystery-speech-bubble">
+          <p>"Congratulations, or sorry that happened! Don't forget to spay and neuter your minions!"</p>
+        </div>
+        <div class="mystery-btn-row">
+          <button class="btn-primary" id="wheel-farewell-btn">Continue</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  return new Promise(resolve => {
+    document.getElementById('wheel-farewell-btn').onclick = () => resolve();
+  });
 }
 
 function _showBeggarThankYou(data) {
@@ -3283,6 +3319,10 @@ async function _resolveFairyKingReward() {
 function _closeMysteryResult() {
   document.getElementById('battle-overlay').classList.add('hidden');
   _pendingMysteryEvent = null;
+  if (gameState) {
+    viewingPlayerId = gameState.current_player_id;
+    applyState(gameState);
+  }
   _resumeTierMusic(gameState);
   loadAndRenderAbilities();
   _checkPendingMinions(gameState);
