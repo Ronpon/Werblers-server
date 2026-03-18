@@ -2898,36 +2898,46 @@ body {
 }
 #card-preview-tooltip.hidden { display: none; }
 
-/* ============================================================ MYSTERY EVENT MODAL */
-.mystery-modal {
+/* ============================================================ MYSTERY EVENT — FULL SCREEN */
+.mystery-fullscreen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-size: cover;
+  background-position: center;
+}
+.mystery-fs-inner {
   position: relative;
-  max-width: 520px;
-  margin: 5vh auto;
-  background: linear-gradient(135deg, #1c1914 0%, #251f18 100%);
+  max-width: 600px;
+  width: 90%;
+  background: rgba(20, 16, 12, 0.92);
   border: 2px solid var(--gold);
   border-radius: 16px;
   padding: 32px 28px;
   text-align: center;
   box-shadow: 0 0 60px rgba(201,168,76,0.25);
   animation: mysteryFadeIn 0.4s ease;
+  max-height: 85vh;
+  overflow-y: auto;
 }
 @keyframes mysteryFadeIn {
   from { opacity: 0; transform: scale(0.9) translateY(20px); }
   to   { opacity: 1; transform: scale(1) translateY(0); }
 }
-.mystery-header { margin-bottom: 16px; }
-.mystery-title {
+.mystery-fs-title {
   font-size: 1.8em;
   color: var(--gold-light);
   text-shadow: 0 2px 8px rgba(0,0,0,0.6);
   margin-bottom: 6px;
 }
-.mystery-desc {
+.mystery-fs-desc {
   color: var(--text-dim);
-  font-size: 0.95em;
+  font-size: 1.05em;
   font-style: italic;
+  margin-bottom: 16px;
 }
-.mystery-event-img {
+.mystery-fs-img {
   width: 100%;
   max-width: 340px;
   height: auto;
@@ -2936,7 +2946,7 @@ body {
   display: block;
   border: 1px solid var(--border);
 }
-.mystery-body { margin-top: 12px; }
+.mystery-fs-body { margin-top: 12px; }
 .mystery-info {
   color: var(--text);
   margin-bottom: 14px;
@@ -2945,28 +2955,50 @@ body {
 .mystery-item-grid {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   justify-content: center;
   margin-bottom: 16px;
 }
-.mystery-item-btn {
-  padding: 8px 16px;
-  font-size: 0.92em;
-  min-width: 100px;
-  border: 1px solid var(--border);
+.mystery-selectable-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 10px;
+  min-width: 90px;
+  max-width: 120px;
+  border: 2px solid var(--border);
   border-radius: 8px;
   cursor: pointer;
   transition: all 0.15s;
+  background: rgba(30, 26, 22, 0.7);
 }
-.mystery-item-btn:hover {
+.mystery-selectable-item:hover {
   border-color: var(--gold);
   background: rgba(201,168,76,0.12);
 }
-.mystery-item-btn.selected {
+.mystery-selectable-item.selected {
   border-color: var(--gold-light);
   background: rgba(201,168,76,0.25);
-  color: var(--gold-light);
-  font-weight: bold;
+  box-shadow: 0 0 12px rgba(201,168,76,0.3);
+}
+.mystery-item-thumb {
+  width: 70px;
+  height: auto;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+.mystery-item-label {
+  font-size: 0.82em;
+  color: var(--text);
+  word-break: break-word;
+  text-align: center;
+}
+.mystery-btn-row {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 16px;
+  flex-wrap: wrap;
 }
 .mystery-spin-btn {
   font-size: 1.15em;
@@ -2977,4 +3009,13 @@ body {
   color: var(--gold-light);
   margin: 20px 0;
   font-weight: bold;
+}
+/* Fairy King reveal flash */
+.fk-reveal-flash {
+  animation: fkFlash 0.6s ease;
+}
+@keyframes fkFlash {
+  0%   { opacity: 0; transform: scale(1.1); filter: brightness(3); }
+  50%  { opacity: 1; filter: brightness(2); }
+  100% { opacity: 1; transform: scale(1); filter: brightness(1); }
 }

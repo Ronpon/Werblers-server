@@ -127,7 +127,8 @@ def api_begin_move():
         _pending_log = log
         _last_log = log
         me = result.get("mystery_event", {})
-        me["image"] = f"Events/{me['name']} Tier {me['tier']}.png"
+        img_name = me.get('image_name') or me['name']
+        me["image"] = f"Events/{img_name} Tier {me['tier']}.png"
         return jsonify({
             "phase":         "mystery",
             "mystery_event": me,
@@ -247,6 +248,21 @@ def api_resolve_mystery():
     event_id = event.event_id
     tier = event.tier
 
+    # Handle skip/decline — finish the turn without resolving the event
+    action = data.get("action", "")
+    if action == "skip":
+        log.append(f"Declined the {event.name} event.")
+        _game._pending_offer = None
+        _game._finish_post_encounter(player, log)
+        _game._advance_turn()
+        _pending_log = []
+        _last_log = log
+        return jsonify({
+            "phase": "done",
+            "mystery_result": "Declined",
+            "state": _build_state(),
+        })
+
     if event_id == "mystery_box":
         wager_idx = int(data.get("wager_index", -1))
         result = _mys.resolve_mystery_box(
@@ -276,9 +292,9 @@ def api_resolve_mystery():
     elif event_id == "thief":
         result = _mys.resolve_thief(player, log)
 
-    elif event_id == "fairy_king":
+    elif event_id == "beggar":
         give_idx = int(data.get("wager_index", -1))
-        result = _mys.resolve_fairy_king(
+        result = _mys.resolve_beggar(
             player, tier, _game.item_decks, give_idx, log,
         )
 
@@ -348,6 +364,38 @@ def api_resolve_mystery():
             "offer": {"items": [_item_to_dict_from_obj(item)]},
         })
 
+    # Fairy King reveal: keep pending offer alive so player can choose a T3 reward
+    if result.get("prize_type") == "fairy_king_reveal":
+        reward_items = result.get("reward_items", [])
+        _game._pending_offer = {
+            "type": "fairy_king_reward",
+            "reward_items": reward_items,
+            "moved_from": po["moved_from"], "moved_to": po["moved_to"],
+            "card_played": po["card_played"], "tile_type": po["tile_type"],
+            "log": log,
+        }
+        _last_log = log
+        _pending_log = log
+        return jsonify({
+            "phase": "fairy_king_reveal",
+            "mystery_result": result.get("label", ""),
+            "state": _build_state(),
+            "reward_items": [_item_to_dict_from_obj(i) for i in reward_items],
+        })
+
+    # Beggar accepted a gift (not the 3rd) — finish turn but signal UI
+    if result.get("prize_type") == "beggar_thank":
+        _game._pending_offer = None
+        _game._finish_post_encounter(player, log)
+        _game._advance_turn()
+        _pending_log = []
+        _last_log = log
+        return jsonify({
+            "phase": "beggar_thank",
+            "mystery_result": result.get("label", ""),
+            "state": _build_state(),
+        })
+
     # Otherwise (nothing, skip, trait, smith_enhance, gift_accepted, stolen)
     # — finish the turn
     _game._pending_offer = None
@@ -373,6 +421,45 @@ def _item_to_dict_from_obj(item) -> dict:
         "is_consumable": item.is_consumable,
         "card_image": _item_card_image(item.name, item.slot.value),
     }
+
+
+@app.route("/api/resolve_fairy_king_reward", methods=["POST"])
+def api_resolve_fairy_king_reward():
+    """Player chooses one of the 3 T3 items offered by the Fairy King."""
+    global _last_log, _pending_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    po = _game._pending_offer
+    if po is None or po.get("type") != "fairy_king_reward":
+        return jsonify({"error": "No pending Fairy King reward"}), 400
+
+    data: dict = request.get_json(force=True) or {}
+    choice = int(data.get("choice_index", -1))
+    reward_items = po["reward_items"]
+    if choice < 0 or choice >= len(reward_items):
+        return jsonify({"error": "Invalid choice"}), 400
+
+    player = _game.current_player
+    chosen = reward_items[choice]
+    log: list[str] = po.get("log", _pending_log or [])
+
+    # Set up item placement like a chest offer
+    _game._pending_offer = {
+        "type": "chest",
+        "level": 3,
+        "items": [chosen],
+        "moved_from": po["moved_from"], "moved_to": po["moved_to"],
+        "card_played": po["card_played"], "tile_type": po["tile_type"],
+    }
+    log.append(f"The Fairy King bestows: {chosen.name}!")
+    _last_log = log
+    _pending_log = log
+    return jsonify({
+        "phase": "offer_chest",
+        "mystery_result": f"Fairy King reward: {chosen.name}",
+        "state": _build_state(),
+        "offer": {"items": [_item_to_dict_from_obj(chosen)]},
+    })
 
 
 @app.route("/api/resolve_rake_it_in", methods=["POST"])
@@ -424,6 +511,7 @@ def api_equip_from_pack():
     pack_index = int(data.get("pack_index", 0))
     force   = bool(data.get("force",   False))
     to_pack = bool(data.get("to_pack", False))
+    discard_pack_index = int(data.get("discard_pack_index", -1))
     player = _game.current_player
     if pack_index < 0 or pack_index >= len(player.pack):
         return jsonify({"error": "Invalid pack index"}), 400
@@ -446,12 +534,21 @@ def api_equip_from_pack():
                     # We check against pack_size - (len(pack) - 1) because
                     # the new item leaves the pack when equipped.
                     if player.pack_slots_used - 1 >= player.pack_size:
-                        return jsonify({"error": "Pack is full — can't swap to pack"}), 400
+                        if discard_pack_index >= 0:
+                            # Discard a pack slot to make room
+                            player.evict_pack_slot(discard_pack_index)
+                        else:
+                            # Return pack contents so frontend can ask which to discard
+                            pack_data = [{"name": p.name, "card_image": _item_card_image(p.name, p.slot.value)} for p in player.pack]
+                            return jsonify({"error": "pack_full", "pack": pack_data})
                     player.unequip(displaced)
-                    # Insert displaced item at the same pack slot the dragged
-                    # item came from so the swap feels natural.
-                    player.pack.pop(pack_index)
-                    player.pack.insert(pack_index, displaced)
+                    # Recalculate pack_index in case eviction shifted it
+                    try:
+                        pi = player.pack.index(item)
+                    except ValueError:
+                        pi = pack_index
+                    player.pack.pop(pi)
+                    player.pack.insert(min(pi, len(player.pack)), displaced)
                     player.equip(item)
                     from werblers_engine import effects as _fx
                     _fx.refresh_tokens(player)
@@ -958,11 +1055,18 @@ def api_place_trait_item():
 
     JSON body:
         placement_choices : same placement dict as resolve_offer uses
+        player_id         : optional, target a specific player (for Rake It In after turn advance)
     """
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
-    player = _game.current_player
+    target_pid = data.get("player_id")
+    if target_pid is not None:
+        player = next((p for p in _game.players if p.player_id == target_pid), None)
+        if player is None:
+            return jsonify({"error": "Unknown player_id"}), 400
+    else:
+        player = _game.current_player
     if not player.pending_trait_items:
         return jsonify({"error": "No pending trait items"}), 400
     item = player.pending_trait_items.pop(0)
@@ -1144,6 +1248,8 @@ _ITEM_FILENAME_OVERRIDES: dict[str, str] = {
     "Pumped Up Kicks": "Pumped up Kicks",
     # Card file uses abbreviated name
     "Chestplate Made of What the Black Box is Made of": "Black Box Chestplate",
+    # Game data uses lowercase 'b' but card file uses capital B
+    "Sweet bandana": "Sweet Bandana",
 }
 
 def _normalize_item_filename(name: str) -> str:
@@ -1351,6 +1457,8 @@ def _build_state() -> dict:
             "pending_trait_items":    [_ser_item(i) for i in p.pending_trait_items],
             "pending_trait_minions": [{"name": m.name, "strength_bonus": m.strength_bonus, "effect_id": m.effect_id, "card_image": _minion_card_image(m.name)} for m in p.pending_trait_minions],
             "max_minions":           p.MAX_MINIONS,
+            "beggar_gifts":          getattr(p, "_beggar_gifts", 0),
+            "beggar_completed":      getattr(p, "_beggar_completed", False),
         })
     return {
         "turn_number":       g.turn_number,

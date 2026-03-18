@@ -278,7 +278,7 @@ TRAIT_DESCRIPTIONS: dict[str, str] = {
     "Bark Worse Than its Bite": "+3 Str for each empty equipment slot.",
     "Strengthened by Taint": "+2 Str for each curse you have.",
     # Monster traits — on-gain items / special
-    "Ball and Chain": "Gain the Ball and Chain item (Weapon, +7 Str).",
+    "Ball and Chain": "Gain the Ball and Chain item (Weapon, +5 Str).",
     "You Got a Birdie!": "Take a Power Driver Equip Card (2H, +10 Str).",
     "Kapwing!": "Gain a Bulletproof Vest (+8 chest armour).",
     "I'm a Grown-up Now!": "Gain a Ted Bearson Minion Card (+3 Str).",

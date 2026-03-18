@@ -32,17 +32,18 @@ class MysteryEvent:
     name: str              # display name
     tier: int              # 1/2/3 derived from board position
     description: str = ""  # flavour text shown on the modal
+    image_name: str = ""   # filename prefix for Events/ images (if different from name)
 
 
 # Event catalogue with rarity bands
-_EVENT_TABLE: list[tuple[str, str, str]] = [
-    # (event_id, display_name, rarity)
-    ("mystery_box",  "Mystery Box",  "common"),
-    ("the_wheel",    "The Wheel",    "common"),
-    ("the_smith",    "The Smith",    "uncommon"),
-    ("bandits",      "Bandits",      "uncommon"),
-    ("thief",        "Thief",        "rare"),
-    ("fairy_king",   "Fairy King",   "rare"),
+_EVENT_TABLE: list[tuple[str, str, str, str]] = [
+    # (event_id, display_name, rarity, image_name)
+    ("mystery_box",  "Mystery Box",  "common",   "Mystery Box"),
+    ("the_wheel",    "The Wheel",    "common",   "Wheel"),
+    ("the_smith",    "The Smith",    "uncommon", "Smith"),
+    ("bandits",      "Bandits",      "uncommon", "Bandits"),
+    ("thief",        "Thief",        "rare",     "Thief"),
+    ("beggar",       "Beggar",       "rare",     "Beggar"),
 ]
 
 _RARITY_WEIGHTS = {
@@ -74,6 +75,7 @@ def roll_mystery_event(position: int, rng: random.Random | None = None) -> Myste
     ids = [e[0] for e in _EVENT_TABLE]
     names = [e[1] for e in _EVENT_TABLE]
     rarities = [e[2] for e in _EVENT_TABLE]
+    image_names = [e[3] for e in _EVENT_TABLE]
     weights = [_RARITY_WEIGHTS[r] for r in rarities]
 
     idx = rng.choices(range(len(ids)), weights=weights, k=1)[0]
@@ -83,6 +85,7 @@ def roll_mystery_event(position: int, rng: random.Random | None = None) -> Myste
         name=names[idx],
         tier=tier,
         description=desc,
+        image_name=image_names[idx],
     )
 
 
@@ -92,7 +95,7 @@ _EVENT_DESCRIPTIONS = {
     "the_smith":    "A skilled blacksmith offers their services.",
     "bandits":      "Bandits leap from the shadows!",
     "thief":        "A thief slinks out of the darkness!",
-    "fairy_king":   "The Fairy King appears and asks for a gift.",
+    "beggar":       "A ragged beggar approaches you, hand outstretched.",
 }
 
 
@@ -280,61 +283,69 @@ def resolve_thief(
     return {"prize_type": "stolen", "items": names, "label": "Lost all pack items"}
 
 
-def resolve_fairy_king(
+def resolve_beggar(
     player: Player,
     tier: int,
     item_decks: dict[int, Deck],
     give_pack_index: int,
     log: list[str],
 ) -> dict:
-    """Fairy King: give an item. Track per-player counter. 3rd gift → Tier 3 item reward.
+    """Beggar: give an item. Track per-player counter. 3rd gift triggers Fairy King reveal.
 
-    The counter is stored as a player attribute ``_fairy_king_gifts``.
+    The counter is stored as ``_beggar_gifts`` and ``_beggar_completed`` on the player.
+    After the 3rd gift, the beggar transforms into the Fairy King who offers 3 T3 items.
     """
-    gifts_so_far = getattr(player, "_fairy_king_gifts", 0)
+    if getattr(player, "_beggar_completed", False):
+        log.append("The Fairy King has nothing more for you — good luck!")
+        return {"prize_type": "skip", "label": "Fairy King: nothing more"}
+
+    gifts_so_far = getattr(player, "_beggar_gifts", 0)
     np = len(player.pack)
     nc = len(player.consumables)
     nm = len(player.captured_monsters)
     total = np + nc + nm
-    # Check if player has anything to give
     all_equipped = player.helmets + player.chest_armor + player.leg_armor + player.weapons
     total_all = total + len(all_equipped)
     if total_all == 0:
-        log.append("Fairy King: you have nothing to give — the Fairy King bows and departs.")
+        log.append("Beggar: you have nothing to give — the beggar sighs and shuffles away.")
         return {"prize_type": "skip", "label": "Nothing to give"}
 
     if give_pack_index < 0 or give_pack_index >= total + len(all_equipped):
-        log.append("Fairy King: invalid item selection.")
+        log.append("Beggar: invalid item selection.")
         return {"prize_type": "error"}
 
     # Give from pack first, then equipped
     if give_pack_index < total:
         name = player.evict_pack_slot(give_pack_index)
-        log.append(f"Fairy King: you gave {name}.")
+        log.append(f"Beggar: you gave {name}.")
     else:
         equip_idx = give_pack_index - total
         item = all_equipped[equip_idx]
         player.unequip(item)
-        log.append(f"Fairy King: you gave {item.name} (equipped).")
-        name = item.name
+        log.append(f"Beggar: you gave {item.name} (equipped).")
 
     gifts_so_far += 1
-    player._fairy_king_gifts = gifts_so_far  # type: ignore[attr-defined]
+    player._beggar_gifts = gifts_so_far  # type: ignore[attr-defined]
 
     if gifts_so_far >= 3:
-        # Reset counter and grant Tier 3 item
-        player._fairy_king_gifts = 0  # type: ignore[attr-defined]
-        reward = item_decks[3].draw()
-        if reward:
-            log.append(f"Fairy King: impressed by your generosity! Received {reward.name} (Tier 3)!")
-            return {"prize_type": "item", "item": reward, "label": f"Tier 3 reward: {reward.name}", "fairy_king_reward": True}
-        else:
-            log.append("Fairy King: impressed, but the deck is empty — no reward.")
-            return {"prize_type": "nothing", "label": "Deck empty", "fairy_king_reward": True}
+        # 3rd gift: Fairy King reveal — draw 3 T3 items for player to choose from
+        player._beggar_completed = True  # type: ignore[attr-defined]
+        reward_items = []
+        for _ in range(3):
+            item = item_decks[3].draw()
+            if item:
+                reward_items.append(item)
+        log.append("Beggar transforms into the Fairy King!")
+        return {
+            "prize_type": "fairy_king_reveal",
+            "reward_items": reward_items,
+            "label": "The Fairy King reveals himself!",
+        }
     else:
-        remaining = 3 - gifts_so_far
-        log.append(f"Fairy King: {remaining} more gift(s) until a reward!")
-        return {"prize_type": "gift_accepted", "gifts_remaining": remaining, "label": f"Gift accepted ({remaining} more to go)"}
+        return {
+            "prize_type": "beggar_thank",
+            "label": "Thank you for your generosity.",
+        }
 
 
 # ---------------------------------------------------------------------------

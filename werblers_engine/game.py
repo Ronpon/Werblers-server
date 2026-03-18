@@ -1255,6 +1255,7 @@ class Game:
                     "name": event.name,
                     "tier": event.tier,
                     "description": event.description,
+                    "image_name": event.image_name,
                 },
             }
 

@@ -413,14 +413,16 @@ function _showOccupiedSlotModal(packIndex, newItem, equippedItem, packSlotsFree)
       ${cardOf(newItem, 'Replacing With')}
     </div>`;
   const toPackBtn = modal.querySelector('button[onclick="_occupiedSlotAction(\'to_pack\')"]');
-  if (toPackBtn) toPackBtn.disabled = packSlotsFree <= 0;
+  if (toPackBtn && packSlotsFree <= 0) toPackBtn.textContent = 'Move to Pack (full — choose discard)';
   modal.classList.remove('hidden');
 }
 
-async function _occupiedSlotAction(action) {
+async function _occupiedSlotAction(action, extraParams) {
   document.getElementById('occupied-slot-modal').classList.add('hidden');
   if (action === 'cancel' || _occupiedSlotPackIndex < 0) return;
   const body = { pack_index: _occupiedSlotPackIndex, force: action !== 'cancel', to_pack: action === 'to_pack' };
+  if (extraParams) Object.assign(body, extraParams);
+  const savedPackIndex = _occupiedSlotPackIndex;
   _occupiedSlotPackIndex = -1;
   const resp = await fetch('/api/equip_from_pack', {
     method: 'POST',
@@ -428,8 +430,39 @@ async function _occupiedSlotAction(action) {
     body: JSON.stringify(body),
   });
   const data = await resp.json();
+  if (data.error === 'pack_full' && data.pack) {
+    // Show pack discard choice, then retry with discard_pack_index
+    _showEquipPackDiscardChoice(data.pack, savedPackIndex);
+    return;
+  }
   if (data.error) { alert(data.error); return; }
   applyState(data.state);
+}
+
+function _showEquipPackDiscardChoice(packItems, origPackIndex) {
+  const overlay = document.createElement('div');
+  overlay.id = 'equip-pack-discard-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 24px;max-width:480px;text-align:center';
+  box.innerHTML = `<div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:12px">Pack Full</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:16px">Choose an item to discard from your pack to make room:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${packItems.map((p, i) => {
+      const img = p.card_image ? `<img src="/images/${p.card_image}" style="width:70px;border-radius:4px;display:block">` : '';
+      return `<div class="rake-equip-btn" style="cursor:pointer" onclick="window._confirmEquipPackDiscard(${i})">
+        ${img}
+        <div style="font-size:10px;color:var(--text,#e0e0e0);margin-top:4px;max-width:80px;word-break:break-word">${p.name}</div>
+      </div>`;
+    }).join('')}</div>
+    <div style="margin-top:16px"><button class="btn-secondary" onclick="window._cancelEquipPackDiscard()">Cancel</button></div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  window._confirmEquipPackDiscard = async (dpi) => {
+    overlay.remove();
+    _occupiedSlotPackIndex = origPackIndex;
+    await _occupiedSlotAction('to_pack', { discard_pack_index: dpi });
+  };
+  window._cancelEquipPackDiscard = () => overlay.remove();
 }
 
 // ================================================================ ABILITIES
@@ -1388,6 +1421,8 @@ async function resolveRakeItIn(useIt) {
   });
   const data = await resp.json();
   _rakeItInData = null;
+  // Save the current player before state update (turn may advance)
+  const rakePlayerId = gameState ? gameState.current_player_id : viewingPlayerId;
   if (data.state) {
     gameState = data.state;
     viewingPlayerId = gameState.current_player_id;
@@ -1408,8 +1443,8 @@ async function resolveRakeItIn(useIt) {
         onClose: resolve,
       });
     });
-    // Place the bonus item via the pending trait items flow
-    await _placePendingTraitItems();
+    // Place the bonus item via the pending trait items flow (use the original player)
+    await _placePendingTraitItems(rakePlayerId);
   }
   await loadAndRenderAbilities();
 }
@@ -2186,9 +2221,10 @@ async function _placePendingMinions() {
   });
 }
 
-async function _placePendingTraitItems() {
+async function _placePendingTraitItems(forPlayerId) {
   if (!gameState) return;
-  const p = gameState.players.find(x => x.player_id === viewingPlayerId);
+  const pid = forPlayerId || viewingPlayerId;
+  const p = gameState.players.find(x => x.player_id === pid);
   if (!p || !p.pending_trait_items || !p.pending_trait_items.length) return;
   for (let i = 0; i < p.pending_trait_items.length; i++) {
     const item = p.pending_trait_items[i];
@@ -2208,10 +2244,12 @@ async function _placePendingTraitItems() {
     // Open placement screen
     await new Promise(resolve => {
       showInventoryPopup(item, async (choices) => {
+        const body = { placement_choices: choices };
+        if (forPlayerId) body.player_id = forPlayerId;
         const resp = await fetch('/api/place_trait_item', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ placement_choices: choices }),
+          body: JSON.stringify(body),
         });
         const data = await resp.json();
         if (data.state) { gameState = data.state; applyState(data.state); }
@@ -2872,15 +2910,17 @@ function _strBreakdownTitle(combat) {
 // ================================================================ MYSTERY EVENT MODAL
 
 let _pendingMysteryEvent = null;
+let _mysterySelectedIdx = -1;
 
 function showMysteryEventModal(event, state) {
   _pendingMysteryEvent = event;
+  _mysterySelectedIdx = -1;
   const overlay = document.getElementById('battle-overlay');
   const imgSrc = event.image ? `/images/${event.image}` : '';
   const player = state.players.find(p => p.is_current) || state.players[0];
+  const bg = state.tile_scene?.background ? `/images/${state.tile_scene.background}` : '';
 
   let bodyHtml = '';
-
   if (event.event_id === 'mystery_box') {
     bodyHtml = _renderMysteryBox(event, player);
   } else if (event.event_id === 'the_wheel') {
@@ -2891,18 +2931,18 @@ function showMysteryEventModal(event, state) {
     bodyHtml = _renderBandits(event);
   } else if (event.event_id === 'thief') {
     bodyHtml = _renderThief(event);
-  } else if (event.event_id === 'fairy_king') {
-    bodyHtml = _renderFairyKing(event, player);
+  } else if (event.event_id === 'beggar') {
+    bodyHtml = _renderBeggar(event, player);
   }
 
   overlay.innerHTML = `
-    <div class="mystery-modal">
-      <div class="mystery-header">
-        <h2 class="mystery-title">${event.name}</h2>
-        <p class="mystery-desc">${event.description || ''}</p>
+    <div class="battle-content mystery-fullscreen" ${bg ? `style="background-image:url('${bg}')"` : ''}>
+      <div class="mystery-fs-inner">
+        <h2 class="mystery-fs-title">${event.name}</h2>
+        <p class="mystery-fs-desc">${event.description || ''}</p>
+        ${imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
+        <div class="mystery-fs-body">${bodyHtml}</div>
       </div>
-      ${imgSrc ? `<img class="mystery-event-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
-      <div class="mystery-body">${bodyHtml}</div>
     </div>`;
   overlay.classList.remove('hidden');
 }
@@ -2913,16 +2953,25 @@ function _renderMysteryBox(event, player) {
     return `<p class="mystery-info">You have nothing to wager!</p>
             <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
   }
-  const itemBtns = packItems.map((item, i) =>
-    `<button class="btn-secondary mystery-item-btn" onclick="_resolveMysteryBox(${i})">${item.name}</button>`
-  ).join('');
+  const itemBtns = packItems.map((item, i) => {
+    const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
+    return `<div class="mystery-selectable-item" data-idx="${i}" onclick="_selectMysteryItem(${i}, this)">
+      ${img}<div class="mystery-item-label">${item.name}</div>
+    </div>`;
+  }).join('');
   return `<p class="mystery-info">Choose an item from your pack to wager:</p>
-          <div class="mystery-item-grid">${itemBtns}</div>`;
+          <div class="mystery-item-grid">${itemBtns}</div>
+          <div class="mystery-btn-row">
+            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Wager Item</button>
+            <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
+          </div>`;
 }
 
 function _renderTheWheel(event) {
   return `<p class="mystery-info">Spin the wheel for a free prize!</p>
-          <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin the Wheel!</button>`;
+          <div class="mystery-btn-row">
+            <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin the Wheel!</button>
+          </div>`;
 }
 
 function _renderTheSmith(event, player) {
@@ -2932,48 +2981,94 @@ function _renderTheSmith(event, player) {
       return `<p class="mystery-info">You need at least 3 pack items to trade. You have ${packItems.length}.</p>
               <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
     }
+    const itemBtns = packItems.map((item, i) => {
+      const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
+      return `<div class="mystery-selectable-item smith-item" data-idx="${i}" onclick="_toggleSmithItem(this)">
+        ${img}<div class="mystery-item-label">${item.name}</div>
+      </div>`;
+    }).join('');
     return `<p class="mystery-info">Select 3 items to trade for a Tier ${Math.min(event.tier + 1, 3)} item:</p>
-            <div class="mystery-item-grid" id="smith-grid">${packItems.map((item, i) =>
-              `<button class="btn-secondary mystery-item-btn smith-item" data-idx="${i}" onclick="_toggleSmithItem(this)">${item.name}</button>`
-            ).join('')}</div>
-            <button class="btn-primary" id="smith-confirm-btn" onclick="_resolveMysterySmith()" disabled>Trade (select 3)</button>`;
+            <div class="mystery-item-grid" id="smith-grid">${itemBtns}</div>
+            <div class="mystery-btn-row">
+              <button class="btn-primary" id="smith-confirm-btn" onclick="_resolveMysterySmith()" disabled>Trade (select 3)</button>
+              <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
+            </div>`;
   } else {
-    // Tier 3: choose equipped item to enhance
     const equipped = _getAllEquipped(player);
     if (equipped.length === 0) {
       return `<p class="mystery-info">You have no equipped items to enhance.</p>
               <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
     }
+    const itemBtns = equipped.map((item, i) => {
+      const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
+      return `<div class="mystery-selectable-item" data-idx="${i}" onclick="_selectMysteryItem(${i}, this)">
+        ${img}<div class="mystery-item-label">${item.name} (+${item.strength_bonus})</div>
+      </div>`;
+    }).join('');
     return `<p class="mystery-info">Choose an equipped item to receive +3 Str:</p>
-            <div class="mystery-item-grid">${equipped.map((item, i) =>
-              `<button class="btn-secondary mystery-item-btn" onclick="_resolveSmithEnhance(${i})">${item.name} (+${item.strength_bonus})</button>`
-            ).join('')}</div>`;
+            <div class="mystery-item-grid">${itemBtns}</div>
+            <div class="mystery-btn-row">
+              <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveSmithEnhance(_mysterySelectedIdx)" disabled>Enhance</button>
+              <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
+            </div>`;
   }
 }
 
 function _renderBandits(event) {
   return `<p class="mystery-info">Bandits ambush you and steal one of your equipped items!</p>
-          <button class="btn-primary" onclick="_resolveMysteryAuto('bandits')">Face the Bandits</button>`;
+          <div class="mystery-btn-row">
+            <button class="btn-primary" onclick="_resolveMysteryAuto('bandits')">Face the Bandits</button>
+          </div>`;
 }
 
 function _renderThief(event) {
   return `<p class="mystery-info">A thief sneaks up and steals everything from your pack!</p>
-          <button class="btn-primary" onclick="_resolveMysteryAuto('thief')">Encounter the Thief</button>`;
+          <div class="mystery-btn-row">
+            <button class="btn-primary" onclick="_resolveMysteryAuto('thief')">Encounter the Thief</button>
+          </div>`;
 }
 
-function _renderFairyKing(event, player) {
+function _renderBeggar(event, player) {
+  // Check if this player already completed the fairy king reward
+  const beggarDone = player.beggar_completed || false;
+  if (beggarDone) {
+    return `<p class="mystery-info">The Fairy King smiles warmly at you.</p>
+            <p class="mystery-info" style="font-style:italic">"I have nothing more for you; good luck."</p>
+            <div class="mystery-btn-row">
+              <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>
+            </div>`;
+  }
   const packItems = _getUnifiedPack(player);
   const equipped = _getAllEquipped(player);
-  const allItems = [...packItems.map((item, i) => ({name: item.name, idx: i, source: 'pack'})),
-                    ...equipped.map((item, i) => ({name: item.name, idx: packItems.length + i, source: 'equip'}))];
+  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
+                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
   if (allItems.length === 0) {
-    return `<p class="mystery-info">You have nothing to give — the Fairy King departs.</p>
-            <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
+    return `<p class="mystery-info">You have nothing to give — the beggar sighs and shuffles away.</p>
+            <div class="mystery-btn-row">
+              <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>
+            </div>`;
   }
-  return `<p class="mystery-info">Choose an item to give to the Fairy King:</p>
-          <div class="mystery-item-grid">${allItems.map(item =>
-            `<button class="btn-secondary mystery-item-btn" onclick="_resolveFairyKing(${item.idx})">${item.name}</button>`
-          ).join('')}</div>`;
+  const itemBtns = allItems.map(item => {
+    const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
+    return `<div class="mystery-selectable-item" data-idx="${item.idx}" onclick="_selectMysteryItem(${item.idx}, this)">
+      ${img}<div class="mystery-item-label">${item.name}</div>
+    </div>`;
+  }).join('');
+  return `<p class="mystery-info">Choose an item to give to the beggar:</p>
+          <div class="mystery-item-grid">${itemBtns}</div>
+          <div class="mystery-btn-row">
+            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveBeggarGive(_mysterySelectedIdx)" disabled>Give Item</button>
+            <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
+          </div>`;
+}
+
+// Shared item selection for events that need select-then-confirm
+function _selectMysteryItem(idx, el) {
+  _mysterySelectedIdx = idx;
+  document.querySelectorAll('.mystery-selectable-item').forEach(b => b.classList.remove('selected'));
+  if (el) el.classList.add('selected');
+  const btn = document.getElementById('mystery-confirm-btn');
+  if (btn) btn.disabled = false;
 }
 
 // Helper: get unified pack items
@@ -2993,15 +3088,15 @@ function _getAllEquipped(player) {
 
 // Smith: toggle item selection (exactly 3)
 let _smithSelected = new Set();
-function _toggleSmithItem(btn) {
-  const idx = parseInt(btn.dataset.idx);
+function _toggleSmithItem(el) {
+  const idx = parseInt(el.dataset.idx);
   if (_smithSelected.has(idx)) {
     _smithSelected.delete(idx);
-    btn.classList.remove('selected');
+    el.classList.remove('selected');
   } else {
     if (_smithSelected.size >= 3) return;
     _smithSelected.add(idx);
-    btn.classList.add('selected');
+    el.classList.add('selected');
   }
   const confirmBtn = document.getElementById('smith-confirm-btn');
   if (confirmBtn) {
@@ -3013,6 +3108,7 @@ function _toggleSmithItem(btn) {
 // --- Resolution handlers ---
 
 async function _resolveMysteryBox(wagerIndex) {
+  if (wagerIndex < 0) return;
   await _postResolveMystery({action: 'open', wager_index: wagerIndex});
 }
 
@@ -3027,6 +3123,7 @@ async function _resolveMysterySmith() {
 }
 
 async function _resolveSmithEnhance(equipIndex) {
+  if (equipIndex < 0) return;
   await _postResolveMystery({action: 'smith', smith_equip_index: equipIndex, smith_indices: []});
 }
 
@@ -3034,7 +3131,8 @@ async function _resolveMysteryAuto(eventType) {
   await _postResolveMystery({action: 'accept'});
 }
 
-async function _resolveFairyKing(giveIndex) {
+async function _resolveBeggarGive(giveIndex) {
+  if (giveIndex < 0) return;
   await _postResolveMystery({action: 'give', wager_index: giveIndex});
 }
 
@@ -3051,7 +3149,7 @@ async function _postResolveMystery(body) {
     });
     if (!resp.ok) { console.error('resolve_mystery failed', resp.status); return; }
     const data = await resp.json();
-    if (data.state) applyState(data.state);
+    if (data.state) { gameState = data.state; applyState(data.state); }
 
     if (data.phase === 'combat') {
       playMusic('Battle Music.wav');
@@ -3059,21 +3157,127 @@ async function _postResolveMystery(body) {
     } else if (data.phase === 'offer_chest') {
       _pendingOfferData = data.offer;
       showChestModal(data.offer, {});
+    } else if (data.phase === 'beggar_thank') {
+      // Beggar accepted gift — show thank you
+      _showBeggarThankYou(data);
+    } else if (data.phase === 'fairy_king_reveal') {
+      // 3rd gift: beggar transforms into Fairy King
+      _showFairyKingReveal(data);
     } else {
       // done / trait / nothing
       const overlay = document.getElementById('battle-overlay');
       const resultLabel = data.mystery_result || 'Mystery resolved!';
       overlay.innerHTML = `
-        <div class="mystery-modal">
-          <h2 class="mystery-title">Mystery Result</h2>
-          <p class="mystery-result-text">${resultLabel}</p>
-          <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
+        <div class="battle-content mystery-fullscreen">
+          <div class="mystery-fs-inner">
+            <h2 class="mystery-fs-title">Mystery Result</h2>
+            <p class="mystery-fs-desc">${resultLabel}</p>
+            <div class="mystery-btn-row">
+              <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
+            </div>
+          </div>
         </div>`;
       overlay.classList.remove('hidden');
     }
   } catch (err) {
     console.error('resolve_mystery error:', err);
   }
+}
+
+function _showBeggarThankYou(data) {
+  const overlay = document.getElementById('battle-overlay');
+  const imgSrc = _pendingMysteryEvent?.image ? `/images/${_pendingMysteryEvent.image}` : '';
+  overlay.innerHTML = `
+    <div class="battle-content mystery-fullscreen">
+      <div class="mystery-fs-inner">
+        <h2 class="mystery-fs-title">Beggar</h2>
+        ${imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="Beggar" onerror="this.style.display='none'">` : ''}
+        <p class="mystery-fs-desc" style="font-style:italic">"Thank you for your generosity."</p>
+        <div class="mystery-btn-row">
+          <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+}
+
+function _showFairyKingReveal(data) {
+  const overlay = document.getElementById('battle-overlay');
+  const tier = _pendingMysteryEvent?.tier || 1;
+  const beggarImg = `/images/Events/Beggar Tier ${tier}.png`;
+  const fkImg = `/images/Events/Fairy King Tier ${tier}.png`;
+  // Show beggar saying thank you first, then transition to Fairy King after a short delay
+  overlay.innerHTML = `
+    <div class="battle-content mystery-fullscreen">
+      <div class="mystery-fs-inner" id="fk-reveal-inner">
+        <h2 class="mystery-fs-title">Beggar</h2>
+        <img class="mystery-fs-img" id="fk-reveal-img" src="${beggarImg}" alt="Beggar" onerror="this.style.display='none'">
+        <p class="mystery-fs-desc" id="fk-reveal-text" style="font-style:italic">"Thank you for your generosity."</p>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+  setTimeout(() => {
+    const titleEl = document.querySelector('#fk-reveal-inner .mystery-fs-title');
+    const imgEl = document.getElementById('fk-reveal-img');
+    const textEl = document.getElementById('fk-reveal-text');
+    if (titleEl) titleEl.textContent = 'The Fairy King';
+    if (imgEl) { imgEl.classList.add('fk-reveal-flash'); imgEl.src = fkImg; }
+    if (textEl) textEl.innerHTML = '"You shall be rewarded for your kindness."';
+    // After another delay, show item choices
+    setTimeout(() => {
+      const items = data.reward_items || [];
+      const inner = document.getElementById('fk-reveal-inner');
+      if (!inner) return;
+      if (items.length === 0) {
+        inner.innerHTML += `<div class="mystery-btn-row"><button class="btn-primary" onclick="_closeMysteryResult()">Continue</button></div>`;
+        return;
+      }
+      const itemsHtml = items.map((item, i) => {
+        const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
+        return `<div class="mystery-selectable-item" data-idx="${i}" onclick="_selectFairyKingReward(${i}, this)">
+          ${img}<div class="mystery-item-label">${item.name} (+${item.strength_bonus})</div>
+        </div>`;
+      }).join('');
+      const choiceHtml = `
+        <p class="mystery-info" style="margin-top:16px">Choose your reward:</p>
+        <div class="mystery-item-grid">${itemsHtml}</div>
+        <div class="mystery-btn-row">
+          <button class="btn-primary" id="fk-reward-btn" onclick="_resolveFairyKingReward()" disabled>Take Item</button>
+        </div>`;
+      inner.insertAdjacentHTML('beforeend', choiceHtml);
+    }, 2500);
+  }, 2000);
+}
+
+let _fkRewardIdx = -1;
+function _selectFairyKingReward(idx, el) {
+  _fkRewardIdx = idx;
+  document.querySelectorAll('.mystery-selectable-item').forEach(b => b.classList.remove('selected'));
+  if (el) el.classList.add('selected');
+  const btn = document.getElementById('fk-reward-btn');
+  if (btn) btn.disabled = false;
+}
+
+async function _resolveFairyKingReward() {
+  if (_fkRewardIdx < 0) return;
+  try {
+    const resp = await fetch('/api/resolve_fairy_king_reward', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({choice_index: _fkRewardIdx}),
+    });
+    if (!resp.ok) { console.error('fairy king reward failed'); return; }
+    const data = await resp.json();
+    if (data.state) { gameState = data.state; applyState(data.state); }
+    _fkRewardIdx = -1;
+    _pendingMysteryEvent = null;
+    if (data.phase === 'offer_chest') {
+      _pendingOfferData = data.offer;
+      showChestModal(data.offer, {});
+    } else {
+      _closeMysteryResult();
+    }
+  } catch(e) { console.error('fairy king reward error:', e); }
 }
 
 function _closeMysteryResult() {

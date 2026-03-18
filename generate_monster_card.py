@@ -248,7 +248,7 @@ MONSTERS: dict[str, dict] = {
         "description": "Please come in!",
         "trait": {
             "name": "Ball and Chain",
-            "text": 'Take the "Ball and Chain" Item card (+7 Str. 1 handed).',
+            "text": 'Take the "Ball and Chain" Item card (+5 Str. 1 handed).',
         },
         "curse": {
             "name": "Get Rekt",
