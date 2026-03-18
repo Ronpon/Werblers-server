@@ -259,6 +259,7 @@ def api_resolve_mystery():
         _last_log = log
         return jsonify({
             "phase": "done",
+            "prize_type": "skip",
             "mystery_result": "Declined",
             "state": _build_state(),
         })
@@ -340,6 +341,8 @@ def api_resolve_mystery():
         _last_log = log
         return jsonify({
             "phase": "combat",
+            "event_id": event_id,
+            "prize_type": result.get("prize_type", ""),
             "mystery_result": result.get("label", ""),
             "state": _build_state(),
             "combat_info": _enrich_combat_info(combat_info),
@@ -359,6 +362,8 @@ def api_resolve_mystery():
         _pending_log = log
         return jsonify({
             "phase": "offer_chest",
+            "event_id": event_id,
+            "prize_type": result.get("prize_type", ""),
             "mystery_result": result.get("label", ""),
             "state": _build_state(),
             "offer": {"items": [_item_to_dict_from_obj(item)]},
@@ -392,6 +397,8 @@ def api_resolve_mystery():
         _last_log = log
         return jsonify({
             "phase": "beggar_thank",
+            "event_id": event_id,
+            "prize_type": "beggar_thank",
             "mystery_result": result.get("label", ""),
             "state": _build_state(),
         })
@@ -403,11 +410,23 @@ def api_resolve_mystery():
     _game._advance_turn()
     _pending_log = []
     _last_log = log
-    return jsonify({
+
+    # Build rich outcome payload so the frontend can display a proper outcome screen
+    outcome: dict = {
         "phase": "done",
         "mystery_result": result.get("label", ""),
+        "prize_type": result.get("prize_type", "nothing"),
+        "event_id": event_id,
         "state": _build_state(),
-    })
+    }
+    # Include item/trait/stolen info depending on prize_type
+    if result.get("item_name"):
+        outcome["item_name"] = result["item_name"]
+    if result.get("items"):
+        outcome["stolen_items"] = result["items"]
+    if result.get("trait") and hasattr(result["trait"], "name"):
+        outcome["trait_name"] = result["trait"].name
+    return jsonify(outcome)
 
 
 def _item_to_dict_from_obj(item) -> dict:

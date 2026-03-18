@@ -2940,7 +2940,8 @@ function showMysteryEventModal(event, state) {
   const showImg = event.event_id !== 'the_wheel';
 
   overlay.innerHTML = `
-    <div class="battle-content mystery-fullscreen" ${bg ? `style="background-image:url('${bg}')"` : ''}>
+    <div class="battle-bg" style="background-image:url('${bg}')"></div>
+    <div class="battle-content mystery-fullscreen">
       <div class="mystery-fs-inner">
         <h2 class="mystery-fs-title">${event.name}</h2>
         ${showDesc ? `<p class="mystery-fs-desc">${event.description || ''}</p>` : ''}
@@ -3179,18 +3180,31 @@ async function _postResolveMystery(body) {
     }
 
     if (data.phase === 'combat') {
-      playMusic('Battle Music.wav');
-      showPreFightScene(data.combat_info, data.state);
+      // Show outcome screen ("A monster appears!"), then proceed to fight
+      await _showMysteryOutcome(data, () => {
+        _pendingMysteryEvent = null;
+        playMusic('Battle Music.wav');
+        showPreFightScene(data.combat_info, data.state);
+      });
     } else if (data.phase === 'offer_chest') {
-      _pendingOfferData = data.offer;
-      showChestModal(data.offer, {});
+      // Show outcome first, then proceed to chest on Continue
+      await _showMysteryOutcome(data, () => {
+        _pendingMysteryEvent = null;
+        _pendingOfferData = data.offer;
+        showChestModal(data.offer, {});
+      });
     } else if (data.phase === 'beggar_thank') {
       _showBeggarThankYou(data);
     } else if (data.phase === 'fairy_king_reveal') {
       _showFairyKingReveal(data);
     } else {
-      // done / trait / nothing — just close and continue
-      _closeMysteryResult();
+      // done — show outcome screen (stolen, nothing, trait, smith_enhance, etc.)
+      // Skip/decline has no outcome to show
+      if (data.prize_type === 'skip') {
+        _closeMysteryResult();
+      } else {
+        await _showMysteryOutcome(data, () => _closeMysteryResult());
+      }
     }
   } catch (err) {
     console.error('resolve_mystery error:', err);
@@ -3198,52 +3212,143 @@ async function _postResolveMystery(body) {
 }
 
 async function _showWheelFarewell(data) {
+  // Wheel farewell is now handled by _showMysteryOutcome with wheel-specific quote
+  // This is a no-op — the outcome screen handles everything after spinning
+}
+
+// ------ Outcome screen shown after resolving any mystery event ------
+function _getMysteryOutcomeContent(data) {
+  const eventId = data.event_id || (_pendingMysteryEvent && _pendingMysteryEvent.event_id) || '';
+  const prizeType = data.prize_type || '';
+  const label = data.mystery_result || '';
+
+  const itemName = data.offer?.items?.[0]?.name || '';
+
+  let title = '';
+  let outcomeText = '';
+  let quoteText = '';
+
+  switch (eventId) {
+    case 'mystery_box':
+      title = 'Mystery Box';
+      if (prizeType === 'nothing') {
+        outcomeText = 'The box was empty! Better luck next time.';
+      } else if (prizeType === 'trait') {
+        outcomeText = `You gained a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+      } else if (prizeType === 'item') {
+        outcomeText = `You received: <strong>${itemName || 'an item'}</strong>!`;
+      } else if (prizeType === 'monster' || prizeType === 'monster_up') {
+        outcomeText = `A monster leaps from the box!`;
+      } else {
+        outcomeText = label || 'The mystery has been resolved.';
+      }
+      break;
+    case 'the_wheel':
+      title = 'The Wheel';
+      if (prizeType === 'nothing') {
+        outcomeText = 'The wheel lands on nothing! No prize this time.';
+      } else if (prizeType === 'trait') {
+        outcomeText = `You gained a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+      } else if (prizeType === 'item') {
+        outcomeText = `You won: <strong>${itemName || 'an item'}</strong>!`;
+      } else if (prizeType === 'monster' || prizeType === 'monster_up') {
+        outcomeText = 'A monster appears as your "prize"!';
+      } else {
+        outcomeText = label || 'The wheel has spoken.';
+      }
+      quoteText = '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"';
+      break;
+    case 'the_smith':
+      title = 'The Smith';
+      if (prizeType === 'smith_enhance') {
+        outcomeText = `The Smith enhanced <strong>${data.item_name || 'your item'}</strong> with +3 Str!`;
+        quoteText = '"Fine work, if I do say so myself."';
+      } else if (prizeType === 'item') {
+        outcomeText = `The Smith forged you: <strong>${itemName || 'a new item'}</strong>!`;
+        quoteText = '"A fair trade. Use it well."';
+      } else {
+        outcomeText = label || 'The Smith nods and returns to work.';
+      }
+      break;
+    case 'bandits':
+      title = 'Bandits';
+      if (prizeType === 'stolen' && data.item_name) {
+        outcomeText = `The bandits stole your <strong>${data.item_name}</strong>!`;
+      } else if (prizeType === 'skip') {
+        outcomeText = 'The bandits find nothing worth stealing and leave you alone.';
+      } else {
+        outcomeText = label || 'The bandits vanish into the shadows.';
+      }
+      quoteText = '"Thank you for your\u2026 heh\u2026 generosity."';
+      break;
+    case 'thief':
+      title = 'Thief';
+      if (prizeType === 'stolen' && data.stolen_items && data.stolen_items.length > 0) {
+        outcomeText = `The thief stole: <strong>${data.stolen_items.join(', ')}</strong>!`;
+      } else if (prizeType === 'skip') {
+        outcomeText = 'Your pack is empty — the thief slinks away with nothing.';
+      } else {
+        outcomeText = label || 'The thief disappears into the darkness.';
+      }
+      quoteText = '"Nothing personal, mate."';
+      break;
+    case 'beggar':
+      title = 'Beggar';
+      outcomeText = '';
+      quoteText = '"Thank you for your generosity."';
+      break;
+    default:
+      title = _pendingMysteryEvent?.name || 'Mystery';
+      outcomeText = label || 'The mystery has been resolved.';
+      break;
+  }
+  return { title, outcomeText, quoteText };
+}
+
+async function _showMysteryOutcome(data, onContinue) {
+  const { title, outcomeText, quoteText } = _getMysteryOutcomeContent(data);
+  const eventId = data.event_id || (_pendingMysteryEvent && _pendingMysteryEvent.event_id) || '';
   const tier = _pendingMysteryEvent?.tier || 1;
-  const imgSrc = `/images/Events/Wheel Tier ${tier}.png`;
+  const imgName = _pendingMysteryEvent?.image_name || _pendingMysteryEvent?.name || title;
+  const imgSrc = `/images/Events/${imgName} Tier ${tier}.png`;
+  const bg = gameState?.tile_scene?.background ? `/images/${gameState.tile_scene.background}` : '';
   const overlay = document.getElementById('battle-overlay');
+
   overlay.innerHTML = `
+    <div class="battle-bg" style="background-image:url('${bg}')"></div>
     <div class="battle-content mystery-fullscreen">
       <div class="mystery-fs-inner">
-        <h2 class="mystery-fs-title">The Wheel</h2>
-        <img class="mystery-fs-img" src="${imgSrc}" alt="The Wheel" onerror="this.style.display='none'" style="margin:12px auto;display:block">
-        <div class="mystery-speech-bubble">
-          <p>"Congratulations, or sorry that happened! Don't forget to spay and neuter your minions!"</p>
-        </div>
+        <h2 class="mystery-fs-title">${title}</h2>
+        <img class="mystery-fs-img" src="${imgSrc}" alt="${title}" onerror="this.style.display='none'">
+        ${outcomeText ? `<p class="mystery-outcome-text">${outcomeText}</p>` : ''}
+        ${quoteText ? `<div class="mystery-speech-bubble"><p>${quoteText}</p></div>` : ''}
         <div class="mystery-btn-row">
-          <button class="btn-primary" id="wheel-farewell-btn">Continue</button>
+          <button class="btn-primary" id="mystery-outcome-btn">Continue</button>
         </div>
       </div>
     </div>`;
   overlay.classList.remove('hidden');
+
   return new Promise(resolve => {
-    document.getElementById('wheel-farewell-btn').onclick = () => resolve();
+    document.getElementById('mystery-outcome-btn').onclick = () => {
+      if (onContinue) onContinue();
+      resolve();
+    };
   });
 }
 
 function _showBeggarThankYou(data) {
-  const overlay = document.getElementById('battle-overlay');
-  const imgSrc = _pendingMysteryEvent?.image ? `/images/${_pendingMysteryEvent.image}` : '';
-  overlay.innerHTML = `
-    <div class="battle-content mystery-fullscreen">
-      <div class="mystery-fs-inner">
-        <h2 class="mystery-fs-title">Beggar</h2>
-        ${imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="Beggar" onerror="this.style.display='none'">` : ''}
-        <p class="mystery-fs-desc" style="font-style:italic">"Thank you for your generosity."</p>
-        <div class="mystery-btn-row">
-          <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
-        </div>
-      </div>
-    </div>`;
-  overlay.classList.remove('hidden');
+  _showMysteryOutcome(data, () => _closeMysteryResult());
 }
 
 function _showFairyKingReveal(data) {
   const overlay = document.getElementById('battle-overlay');
   const tier = _pendingMysteryEvent?.tier || 1;
+  const bg = gameState?.tile_scene?.background ? `/images/${gameState.tile_scene.background}` : '';
   const beggarImg = `/images/Events/Beggar Tier ${tier}.png`;
   const fkImg = `/images/Events/Fairy King Tier ${tier}.png`;
-  // Show beggar saying thank you first, then transition to Fairy King after a short delay
   overlay.innerHTML = `
+    <div class="battle-bg" style="background-image:url('${bg}')"></div>
     <div class="battle-content mystery-fullscreen">
       <div class="mystery-fs-inner" id="fk-reveal-inner">
         <h2 class="mystery-fs-title">Beggar</h2>
