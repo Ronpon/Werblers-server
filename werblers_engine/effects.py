@@ -323,15 +323,15 @@ def hand_size_cap(player: Player) -> int | None:
 # ON-GAIN: TRAIT
 # ===================================================================
 
-def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> list[Item]:
+def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> tuple[list[Item], list[Minion]]:
     """Apply one-time effects when a trait is first acquired.
 
-    Returns a list of Item objects that need manual placement by the player
-    (i.e. items received from traits that should go through the normal
-    "choose where to put it" flow).
+    Returns a tuple of (pending_items, pending_minions) — items and minions
+    that need manual placement by the player.
     """
     eid = trait.effect_id
     pending_items: list[Item] = []
+    pending_minions: list[Minion] = []
 
     if eid == "ball_and_chain":
         item = Item("Ball and Chain", EquipSlot.WEAPON, strength_bonus=7)
@@ -350,21 +350,30 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> list[Item]:
 
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  I'm a Grown-up Now!: Ted Bearson (+3 minion) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  I'm a Grown-up Now!: Ted Bearson (+3 minion) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  I'm a Grown-up Now!: Ted Bearson (+3 minion) — minion slots full, choose one to replace!")
 
     elif eid == "misunderstood":
         m = Minion("Swamp Friend", strength_bonus=7)
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  Misunderstood: Swamp Friend (+7 minion) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  Misunderstood: Swamp Friend (+7 minion) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  Misunderstood: Swamp Friend (+7 minion) — minion slots full, choose one to replace!")
 
     elif eid == "alpha":
         m = Minion("Pet Velociraptor", strength_bonus=5)
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  Alpha: Pet Velociraptor (+5 minion) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  Alpha: Pet Velociraptor (+5 minion) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  Alpha: Pet Velociraptor (+5 minion) — minion slots full, choose one to replace!")
 
     elif eid == "youre_the_alpha":
         # +1 Str to every currently equipped minion (future ones handled in total_minion_strength)
@@ -377,21 +386,30 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> list[Item]:
 
     elif eid == "new_lord":
         m = Minion("Demon Spawn", strength_bonus=6)
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  New Lord: Demon Spawn (+6 minion) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  New Lord: Demon Spawn (+6 minion) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  New Lord: Demon Spawn (+6 minion) — minion slots full, choose one to replace!")
 
     elif eid == "overlord":
         m = Minion("Minion Wrangler", strength_bonus=3, effect_id="minion_wrangler")
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  Overlord: Minion Wrangler (+3, buffs all other minions +2) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  Overlord: Minion Wrangler (+3, buffs all other minions +2) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  Overlord: Minion Wrangler (+3) — minion slots full, choose one to replace!")
 
     elif eid == "adorable":
         m = Minion("Cute Gremlin", strength_bonus=2)
-        player.minions.append(m)
-        on_minion_gained(player, m, log)
-        log.append("  Adorable: Cute Gremlin (+2 minion) joins your party!")
+        if player.add_minion(m):
+            on_minion_gained(player, m, log)
+            log.append("  Adorable: Cute Gremlin (+2 minion) joins your party!")
+        else:
+            pending_minions.append(m)
+            log.append("  Adorable: Cute Gremlin (+2 minion) — minion slots full, choose one to replace!")
 
     elif eid == "shes_melting":
         from .types import Consumable
@@ -420,7 +438,7 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> list[Item]:
         log.append("  Immunized: the next curse you receive will be negated!")
 
     refresh_tokens(player)
-    return pending_items
+    return pending_items, pending_minions
 
 
 # ===================================================================
@@ -588,15 +606,26 @@ def on_curse_gained(
 
     elif eid == "together_forever":
         teddy = Minion("Lonely Teddy", strength_bonus=-2)
-        player.minions.append(teddy)
+        if not player.add_minion(teddy):
+            # Forced curse minion — discard weakest positive minion to make room
+            weakest_idx = min(range(len(player.minions)), key=lambda i: player.minions[i].strength_bonus)
+            old = player.minions[weakest_idx]
+            player.minions[weakest_idx] = teddy
+            log.append(f"  Together Forever!: {old.name} replaced by Lonely Teddy (-2 Str) — minion slots full!")
+        else:
+            log.append("  Together Forever!: Lonely Teddy (-2 Str minion) joins your party…")
         on_minion_gained(player, teddy, log)
-        log.append("  Together Forever!: Lonely Teddy (-2 Str minion) joins your party\u2026")
 
     elif eid == "dont_get_it_wet_gremlin":
         gremlin = Minion("Crazed Gremlin", strength_bonus=-2)
-        player.minions.append(gremlin)
+        if not player.add_minion(gremlin):
+            weakest_idx = min(range(len(player.minions)), key=lambda i: player.minions[i].strength_bonus)
+            old = player.minions[weakest_idx]
+            player.minions[weakest_idx] = gremlin
+            log.append(f"  Don't Get it Wet: {old.name} replaced by Crazed Gremlin (-2) — minion slots full!")
+        else:
+            log.append("  Don't Get it Wet: Crazed Gremlin (-2 minion) joins your party. Oh no.")
         on_minion_gained(player, gremlin, log)
-        log.append("  Don't Get it Wet: Crazed Gremlin (-2 minion) joins your party. Oh no.")
 
     # --- Pack effects ---
     elif eid in ("flooded_base", "clever_girl"):

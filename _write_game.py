@@ -653,7 +653,7 @@ def encounter_monster(
         if trait:
             player.traits.append(trait)
             log.append(f"  Victory! Gained trait: {trait.name}")
-            _fx.on_trait_gained(player, trait, log)
+            _fx.on_trait_gained(player, trait, log)  # return value unused in legacy path
         else:
             log.append("  Victory! (no traits left in deck)")
     elif result == CombatResult.LOSE:
@@ -764,7 +764,7 @@ def encounter_miniboss(
         if trait:
             player.traits.append(trait)
             log.append(f"  Victory! Gained trait: {trait.name}")
-            _fx.on_trait_gained(player, trait, log)
+            _fx.on_trait_gained(player, trait, log)  # return value unused in legacy path
         else:
             log.append("  Victory! (no traits left in deck)")
     elif result == CombatResult.LOSE:

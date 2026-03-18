@@ -1171,7 +1171,7 @@ class Game:
         # 13. Determine effective encounter type (night override)
         actual_type = tile.tile_type
         if self.is_night and actual_type not in (
-            TileType.MINIBOSS, TileType.WERBLER, TileType.DAY_NIGHT,
+            TileType.MINIBOSS, TileType.WERBLER, TileType.DAY_NIGHT, TileType.MYSTERY,
         ):
             log.append("  Night override \u2192 Monster encounter.")
             actual_type = TileType.MONSTER
@@ -1233,7 +1233,32 @@ class Game:
                 },
             }
 
-        # 15.5 MONSTER — pause for pre-fight consumable phase
+        # 15.5 MYSTERY — pause for interactive mystery event
+        if actual_type == TileType.MYSTERY:
+            from . import mystery as _mys
+            event = _mys.roll_mystery_event(new_pos)
+            log.append(f"Mystery Square: {event.name}!")
+            self._pending_offer = {
+                "type": "mystery",
+                "event": event,
+                "level": level,
+                "moved_from": old_pos, "moved_to": new_pos,
+                "card_played": card_value, "tile_type": tile.tile_type.name,
+            }
+            return {
+                "phase": "mystery",
+                "log": log,
+                "moved_from": old_pos, "moved_to": new_pos,
+                "card_played": card_value, "tile_type": tile.tile_type.name,
+                "mystery_event": {
+                    "event_id": event.event_id,
+                    "name": event.name,
+                    "tier": event.tier,
+                    "description": event.description,
+                },
+            }
+
+        # 15.6 MONSTER — pause for pre-fight consumable phase
         if actual_type == TileType.MONSTER:
             self._prefight_str_bonus = 0
             other_players = [p for p in self.players if p is not player]
@@ -1570,6 +1595,8 @@ class Game:
                 decide_fn=_no_consumable_decide, select_fn=self._select,
                 other_players=other_players,
                 pre_run_ogre=pre_run_ogre,
+                extra_player_strength=extra_str,
+                extra_monster_strength=monster_str_delta,
             )
             if combat_result == CombatResult.WIN:
                 if boss_tile == 30:
@@ -1603,6 +1630,8 @@ class Game:
                 decide_fn=_no_consumable_decide, select_fn=self._select,
                 other_players=other_players,
                 monster_deck_l3=self.monster_decks[3],
+                extra_player_strength=extra_str,
+                extra_monster_strength=monster_str_delta,
             )
             if self.status == GameStatus.WON:
                 self.winner = player.player_id
@@ -2138,6 +2167,10 @@ class Game:
 
         if actual_type == TileType.BLANK:
             enc.encounter_blank(log)
+
+        elif actual_type == TileType.MYSTERY:
+            # Auto-resolve: skip mystery event in non-interactive mode
+            log.append("Mystery Square — (auto-resolved, no effect).")
 
         elif actual_type == TileType.DAY_NIGHT:
             self.is_night = enc.encounter_day_night(self.is_night, log)

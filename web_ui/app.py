@@ -89,6 +89,11 @@ def api_begin_move():
     global _last_log, _pending_log
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
+    # Guard: reject if there's already an unresolved pending state
+    if _game._pending_offer is not None:
+        return jsonify({"error": "Resolve the current offer first"}), 409
+    if _game._pending_combat is not None:
+        return jsonify({"error": "Resolve the current combat first"}), 409
     data: dict = request.get_json(force=True) or {}
     card_index: int = int(data.get("card_index", 0))
     flee: bool = bool(data.get("flee", False))
@@ -117,6 +122,17 @@ def api_begin_move():
             "state":      _build_state(),
             "tile_scene": tile_scene,
             "log":        log,
+        })
+    elif result["phase"] == "mystery":
+        _pending_log = log
+        _last_log = log
+        me = result.get("mystery_event", {})
+        me["image"] = f"Events/{me['name']} Tier {me['tier']}.png"
+        return jsonify({
+            "phase":         "mystery",
+            "mystery_event": me,
+            "state":         _build_state(),
+            "tile_scene":    tile_scene,
         })
     else:
         _pending_log = log
@@ -197,6 +213,167 @@ def api_resolve_offer():
         })
     _pending_log = []
     return jsonify({"phase": "done", "state": _build_state()})
+
+
+# ------------------------------------------------------------------
+# Mystery event resolution
+# ------------------------------------------------------------------
+@app.route("/api/resolve_mystery", methods=["POST"])
+def api_resolve_mystery():
+    """Resolve a pending mystery event.
+
+    JSON body:
+        action: str —  "open" | "spin" | "smith" | "accept" | "give" | "skip"
+        wager_index:   int  (pack slot for mystery_box / fairy_king give)
+        smith_indices:  list[int]  (3 pack slot indices for the smith trade)
+        smith_equip_index: int  (equipped item index for tier-3 smith enhancement)
+    """
+    global _last_log, _pending_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    po = _game._pending_offer
+    if po is None or po.get("type") != "mystery":
+        return jsonify({"error": "No pending mystery event"}), 400
+
+    data: dict = request.get_json(force=True) or {}
+    event = po["event"]
+    player = _game.current_player
+    level = po["level"]
+    log: list[str] = po.get("log", _pending_log or [])
+
+    from werblers_engine import mystery as _mys
+
+    result: dict = {}
+    event_id = event.event_id
+    tier = event.tier
+
+    if event_id == "mystery_box":
+        wager_idx = int(data.get("wager_index", -1))
+        result = _mys.resolve_mystery_box(
+            player, tier, wager_idx,
+            _game.item_decks, _game.monster_decks, _game.trait_deck,
+            log,
+        )
+
+    elif event_id == "the_wheel":
+        result = _mys.resolve_the_wheel(
+            player, tier,
+            _game.item_decks, _game.monster_decks, _game.trait_deck,
+            log,
+        )
+
+    elif event_id == "the_smith":
+        smith_indices = data.get("smith_indices", [])
+        smith_equip_idx = int(data.get("smith_equip_index", -1))
+        result = _mys.resolve_the_smith(
+            player, tier, _game.item_decks,
+            smith_indices, smith_equip_idx, log,
+        )
+
+    elif event_id == "bandits":
+        result = _mys.resolve_bandits(player, log)
+
+    elif event_id == "thief":
+        result = _mys.resolve_thief(player, log)
+
+    elif event_id == "fairy_king":
+        give_idx = int(data.get("wager_index", -1))
+        result = _mys.resolve_fairy_king(
+            player, tier, _game.item_decks, give_idx, log,
+        )
+
+    else:
+        log.append(f"Unknown mystery event: {event_id}")
+        result = {"prize_type": "nothing", "label": "Unknown event"}
+
+    # If the prize is a monster, set up pending combat instead of finishing turn
+    if result.get("prize_type") == "monster":
+        monster = result["monster"]
+        m_tier = result.get("tier", tier)
+        _game._pending_offer = None
+        _game._prefight_str_bonus = 0
+        _game._prefight_monster_str_bonus = 0
+        other_players = [p for p in _game.players if p is not player]
+        _game._pending_combat = {
+            "type": "monster",
+            "monster": monster,
+            "effective_deck": _game.monster_decks[m_tier],
+            "other_players": other_players,
+            "level": m_tier,
+            "log": log,
+            "old_pos": po["moved_from"], "new_pos": po["moved_to"],
+            "card_value": po["card_played"], "tile_type": po["tile_type"],
+            "ill_come_in_again_count": 0,
+            "ill_come_in_again_available": False,
+            "from_mystery": True,
+        }
+        _male_bonus = monster.bonus_vs_male if (monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
+        combat_info = {
+            "monster_name": monster.name,
+            "monster_strength": monster.strength + _male_bonus,
+            "monster_bonus_vs_male": _male_bonus,
+            "player_strength": player.combat_strength(),
+            "player_id": player.player_id,
+            "player_name": player.name,
+            "hero_id": player.hero.id.name if player.hero else None,
+            "category": "monster",
+            "level": m_tier,
+            "result": None,
+        }
+        _game._last_combat_info = combat_info
+        _last_log = log
+        return jsonify({
+            "phase": "combat",
+            "mystery_result": result.get("label", ""),
+            "state": _build_state(),
+            "combat_info": _enrich_combat_info(combat_info),
+        })
+
+    # If the prize is an item, set up a pending offer for placement
+    if result.get("prize_type") == "item" and result.get("item"):
+        item = result["item"]
+        _game._pending_offer = {
+            "type": "chest",
+            "level": level,
+            "items": [item],
+            "moved_from": po["moved_from"], "moved_to": po["moved_to"],
+            "card_played": po["card_played"], "tile_type": po["tile_type"],
+        }
+        _last_log = log
+        _pending_log = log
+        return jsonify({
+            "phase": "offer_chest",
+            "mystery_result": result.get("label", ""),
+            "state": _build_state(),
+            "offer": {"items": [_item_to_dict_from_obj(item)]},
+        })
+
+    # Otherwise (nothing, skip, trait, smith_enhance, gift_accepted, stolen)
+    # — finish the turn
+    _game._pending_offer = None
+    _game._finish_post_encounter(player, log)
+    _game._advance_turn()
+    _pending_log = []
+    _last_log = log
+    return jsonify({
+        "phase": "done",
+        "mystery_result": result.get("label", ""),
+        "state": _build_state(),
+    })
+
+
+def _item_to_dict_from_obj(item) -> dict:
+    """Serialize a types.Item object to dict for JSON (matching _item_to_dict pattern)."""
+    return {
+        "name": item.name,
+        "slot": item.slot.value,
+        "strength_bonus": item.strength_bonus,
+        "effect_id": item.effect_id,
+        "hands": item.hands,
+        "is_consumable": item.is_consumable,
+        "card_image": _item_card_image(item.name, item.slot.value),
+    }
+
 
 @app.route("/api/resolve_rake_it_in", methods=["POST"])
 def api_resolve_rake_it_in():
@@ -419,7 +596,9 @@ def api_use_pack_consumable():
         trait_log: list[str] = [f"{player.name} used {consumable.name}: drew {drawn.name}.",
                                  f"{player.name} gained trait '{trait.name}'!"]
         player.traits.append(trait)
-        _fx.on_trait_gained(player, trait, trait_log)
+        trait_items, trait_minions = _fx.on_trait_gained(player, trait, trait_log)
+        player.pending_trait_items.extend(trait_items)
+        player.pending_trait_minions.extend(trait_minions)
         _fx.refresh_tokens(player)
         _last_log = trait_log
         return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
@@ -586,7 +765,9 @@ def api_use_consumable():
         player.traits.append(trait)
         trait_log.append(f"{player.name} used {consumable.name}: drew {drawn.name}.")
         trait_log.append(f"{player.name} gained trait '{trait.name}'!")
-        _fx.on_trait_gained(player, trait, trait_log)
+        trait_items, trait_minions = _fx.on_trait_gained(player, trait, trait_log)
+        player.pending_trait_items.extend(trait_items)
+        player.pending_trait_minions.extend(trait_minions)
         _fx.refresh_tokens(player)
         _last_log = trait_log
         return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
@@ -859,6 +1040,50 @@ def api_summon_monster():
     return jsonify({"ok": True, "phase": "combat", "state": _build_state(),
                     "combat_info": _enrich_combat_info(combat_info)})
 
+
+# ------------------------------------------------------------------
+# Resolve pending minion replacement (6-slot cap)
+# ------------------------------------------------------------------
+@app.route("/api/resolve_minion", methods=["POST"])
+def api_resolve_minion():
+    """Replace an existing minion with a pending one, or discard the pending minion."""
+    global _last_log
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    data: dict = request.get_json(force=True) or {}
+    player_id: int = int(data.get("player_id", _game.current_player.player_id))
+    replace_index: int = int(data.get("replace_index", -1))
+    discard: bool = bool(data.get("discard", False))
+
+    player = next((p for p in _game.players if p.player_id == player_id), None)
+    if player is None:
+        return jsonify({"error": "Player not found"}), 400
+    if not player.pending_trait_minions:
+        return jsonify({"error": "No pending minions"}), 400
+
+    minion = player.pending_trait_minions.pop(0)
+    log: list[str] = []
+    if discard:
+        log.append(f"  {minion.name} discarded (minion slots full).")
+    elif 0 <= replace_index < len(player.minions):
+        old = player.minions[replace_index]
+        player.minions[replace_index] = minion
+        from werblers_engine import effects as _fx_mod
+        _fx_mod.on_minion_gained(player, minion, log)
+        log.append(f"  {old.name} replaced by {minion.name}.")
+    else:
+        # Try adding normally (shouldn't happen at cap, but just in case)
+        if not player.add_minion(minion):
+            player.pending_trait_minions.insert(0, minion)
+            return jsonify({"error": "Invalid replace_index and at minion cap"}), 400
+        from werblers_engine import effects as _fx_mod
+        _fx_mod.on_minion_gained(player, minion, log)
+        log.append(f"  {minion.name} added to minions.")
+
+    _last_log = log
+    return jsonify({"ok": True, "state": _build_state()})
+
+
 # ------------------------------------------------------------------
 # Legacy single-call endpoint (still works for tests/old clients)
 # ------------------------------------------------------------------
@@ -903,6 +1128,7 @@ def _tile_image(tile, is_night: bool, mb1_defeated: bool = False, mb2_defeated: 
         TileType.MONSTER:   "Tiles/Monster Tile.png",
         TileType.CHEST:     "Tiles/Chest Tile.png",
         TileType.SHOP:      "Tiles/Shop Tile.jpg",
+        TileType.MYSTERY:   "Tiles/Mystery Tile.png",
     }
     return mapping.get(tile.tile_type, "Tiles/Hidden Tile.png")
 _SLOT_IMG_FOLDER = {
@@ -1123,6 +1349,8 @@ def _build_state() -> dict:
             "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
             "movement_card_bonus":    p.hero.movement_card_bonus if p.hero else 0,
             "pending_trait_items":    [_ser_item(i) for i in p.pending_trait_items],
+            "pending_trait_minions": [{"name": m.name, "strength_bonus": m.strength_bonus, "effect_id": m.effect_id, "card_image": _minion_card_image(m.name)} for m in p.pending_trait_minions],
+            "max_minions":           p.MAX_MINIONS,
         })
     return {
         "turn_number":       g.turn_number,

@@ -31,8 +31,9 @@ class Player:
     # Consumables — no slot limit
     consumables: list[Consumable] = field(default_factory=list)
 
-    # Minions — no slot limit
+    # Minions — max 6
     minions: list[Minion] = field(default_factory=list)
+    MAX_MINIONS: int = 6
 
     # Pack — stores items not currently equipped (max 3)
     pack: list[Item] = field(default_factory=list)
@@ -76,6 +77,9 @@ class Player:
 
     # Items received from traits that need manual placement by the player
     pending_trait_items: list[Item] = field(default_factory=list)
+
+    # Minions waiting for player to choose a replacement (at cap)
+    pending_trait_minions: list[Minion] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Hero assignment
@@ -298,6 +302,24 @@ class Player:
             return False
         self.captured_monsters.append(m)
         return True
+
+    @property
+    def minion_slots_free(self) -> int:
+        return max(0, self.MAX_MINIONS - len(self.minions))
+
+    def add_minion(self, minion: Minion, replace_index: int = -1) -> bool:
+        """Add a minion, respecting the 6-slot cap.
+
+        If at cap and ``replace_index`` >= 0, replace that minion.
+        Returns True if added, False if at cap and no replacement chosen.
+        """
+        if len(self.minions) < self.MAX_MINIONS:
+            self.minions.append(minion)
+            return True
+        if 0 <= replace_index < len(self.minions):
+            self.minions[replace_index] = minion
+            return True
+        return False
 
     def evict_pack_slot(self, unified_idx: int) -> Optional[str]:
         """Remove the item at *unified_idx* (pack ++ consumables ++ captured).

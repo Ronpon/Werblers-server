@@ -334,8 +334,9 @@ def _apply_consumable_effect(
                 return False
             player.traits.append(trait)
             log.append(f"  {player.name} gained trait '{trait.name}'.")
-            trait_items = _fx.on_trait_gained(player, trait, log)
+            trait_items, trait_minions = _fx.on_trait_gained(player, trait, log)
             player.pending_trait_items.extend(trait_items)
+            player.pending_trait_minions.extend(trait_minions)
             _fx.refresh_tokens(player)
 
     elif eid == "capture_monster":
@@ -515,8 +516,9 @@ def encounter_monster(
                     f"  Face Mask: auto-win vs Coronavirus! +5 Str tokens on Face Mask "
                     f"(total: +{face_mask_item.tokens}). Gained trait: {trait.name}"
                 )
-                trait_items = _fx.on_trait_gained(player, trait, log)
+                trait_items, trait_minions = _fx.on_trait_gained(player, trait, log)
                 player.pending_trait_items.extend(trait_items)
+                player.pending_trait_minions.extend(trait_minions)
             else:
                 log.append(
                     f"  Face Mask: auto-win vs Coronavirus! +5 Str tokens on Face Mask "
@@ -614,8 +616,9 @@ def encounter_monster(
             if trait:
                 player.traits.append(trait)
                 log.append(f"  Victory! Gained trait: {trait.name}")
-                trait_items = _fx.on_trait_gained(player, trait, log)
+                trait_items, trait_minions = _fx.on_trait_gained(player, trait, log)
                 player.pending_trait_items.extend(trait_items)
+                player.pending_trait_minions.extend(trait_minions)
             else:
                 log.append("  Victory! (no traits left in deck)")
         elif result == CombatResult.LOSE:
@@ -641,8 +644,9 @@ def encounter_monster(
                     if trait:
                         player.traits.append(trait)
                         log.append(f"  It's Not Your Fault!: gained trait {trait.name} instead of curse!")
-                        trait_items = _fx.on_trait_gained(player, trait, log)
+                        trait_items, trait_minions = _fx.on_trait_gained(player, trait, log)
                         player.pending_trait_items.extend(trait_items)
+                        player.pending_trait_minions.extend(trait_minions)
                     else:
                         log.append("  It's Not Your Fault!: no trait available.")
                     skip_curse = True
@@ -1102,6 +1106,8 @@ def encounter_miniboss(
     select_fn: Optional[Callable] = None,
     crossroads_discards: Optional[list[Item]] = None,
     pre_run_ogre: Optional[tuple[int, int]] = None,
+    extra_player_strength: int = 0,
+    extra_monster_strength: int = 0,
 ) -> Optional[CombatResult]:
     """Fight a miniboss. Must win to progress.
 
@@ -1149,7 +1155,7 @@ def encounter_miniboss(
         log.append("  AUTO-WIN triggered!")
     else:
         # Build effective monster with modified strength
-        effective_strength = miniboss.strength + monster_mod
+        effective_strength = miniboss.strength + monster_mod + extra_monster_strength
         # Player modifier applied via a temporary one-shot approach:
         # We adjust monster strength in the opposite direction to avoid
         # touching the player's real combat_strength calculation.
@@ -1158,7 +1164,7 @@ def encounter_miniboss(
         effective_monster = Monster(
             miniboss.name, strength=effective_strength, level=miniboss.level,
         )
-        result = resolve_combat(player, effective_monster, is_night=is_night)
+        result = resolve_combat(player, effective_monster, is_night=is_night, extra_strength=extra_player_strength)
 
     if result == CombatResult.WIN:
         player.defeated_monsters.add(miniboss.name)
@@ -1223,6 +1229,8 @@ def encounter_werbler(
     other_players: Optional[list] = None,
     select_fn: Optional[Callable] = None,
     monster_deck_l3: Optional[Deck[Monster]] = None,
+    extra_player_strength: int = 0,
+    extra_monster_strength: int = 0,
 ) -> tuple[Optional[CombatResult], GameStatus]:
     """Final boss fight. Win → game won; lose → back to tile 61."""
     log.append(f"THE WERBLER: fighting {werbler.name} (str {werbler.strength})")
@@ -1244,12 +1252,12 @@ def encounter_werbler(
     monster_mod += kneel_bonus
 
     # Build effective monster
-    effective_strength = werbler.strength + monster_mod - player_mod
+    effective_strength = werbler.strength + monster_mod + extra_monster_strength - player_mod
     effective_strength = max(0, effective_strength)
     effective_werbler = Monster(
         werbler.name, strength=effective_strength, level=werbler.level,
     )
-    result = resolve_combat(player, effective_werbler, is_night=is_night)
+    result = resolve_combat(player, effective_werbler, is_night=is_night, extra_strength=extra_player_strength)
 
     if result == CombatResult.WIN:
         log.append("  VICTORY! You defeated your Werbler!")

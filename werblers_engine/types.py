@@ -19,6 +19,7 @@ class TileType(Enum):
     DAY_NIGHT = auto()
     MINIBOSS = auto()
     WERBLER = auto()
+    MYSTERY = auto()
 
 
 class EquipSlot(Enum):

@@ -23,8 +23,8 @@ _FIXED_TILES: dict[int, TileType] = {
 _TILE_COUNTS: list[tuple[TileType, int]] = [
     (TileType.MONSTER,   16),
     (TileType.CHEST,     33),
-    (TileType.SHOP,      13),
-    (TileType.BLANK,     15),  # fills remainder so pool totals 77
+    (TileType.SHOP,      10),
+    (TileType.MYSTERY,   18),  # replaces 15 blank + 3 shop
 ]
 
 # Number of DayNight tiles (exactly 1 per row of 10).

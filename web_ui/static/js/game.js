@@ -693,6 +693,8 @@ async function beginMove(cardIndex, direction = 'forward') {
     } else if (data.phase === 'offer_shop') {
       _pendingOfferData = data.offer;
       showShopModal(data.offer, data.state, ts);
+    } else if (data.phase === 'mystery') {
+      showMysteryEventModal(data.mystery_event, data.state);
     }
   } catch (err) {
     console.error('beginMove error:', err);
@@ -2163,7 +2165,25 @@ async function closeGainModal() {
   document.getElementById('gain-modal').classList.add('hidden');
   // Check for pending trait items (items received from traits that need placement)
   await _placePendingTraitItems();
+  // Check for pending minions that need placement (when at cap)
+  await _placePendingMinions();
   await _finishBattleContinue();
+}
+
+async function _placePendingMinions() {
+  if (!gameState) return;
+  const p = gameState.players.find(x => x.player_id === viewingPlayerId);
+  if (!p || !p.pending_trait_minions || !p.pending_trait_minions.length) return;
+  // Show replacement modal and wait for user to resolve each pending minion
+  await new Promise(resolve => {
+    function checkDone() {
+      const latest = gameState.players.find(x => x.player_id === viewingPlayerId);
+      if (!latest || !latest.pending_trait_minions || latest.pending_trait_minions.length === 0) {
+        resolve();
+      }
+    }
+    _showMinionReplacementModal(p, checkDone);
+  });
 }
 
 async function _placePendingTraitItems() {
@@ -2377,7 +2397,8 @@ function renderPlayerSheetFull(state) {
 
   // ---- Minion pool ----
   const minions = p.minions || [];
-  const minionSlots = Array.from({length: 5}, (_, i) => {
+  const maxMinions = p.max_minions || 6;
+  const minionSlots = Array.from({length: maxMinions}, (_, i) => {
     const m = minions[i];
     if (m && m.card_image) {
       return `<div class="ps-minion-slot ps-minion-filled has-card-preview" data-card-image="/images/${m.card_image}">
@@ -2847,6 +2868,293 @@ function _strBreakdownTitle(combat) {
   lines.push(`Total: ${combat.player_strength}`);
   return lines.join('\n');
 }
+
+// ================================================================ MYSTERY EVENT MODAL
+
+let _pendingMysteryEvent = null;
+
+function showMysteryEventModal(event, state) {
+  _pendingMysteryEvent = event;
+  const overlay = document.getElementById('battle-overlay');
+  const imgSrc = event.image ? `/images/${event.image}` : '';
+  const player = state.players.find(p => p.is_current) || state.players[0];
+
+  let bodyHtml = '';
+
+  if (event.event_id === 'mystery_box') {
+    bodyHtml = _renderMysteryBox(event, player);
+  } else if (event.event_id === 'the_wheel') {
+    bodyHtml = _renderTheWheel(event);
+  } else if (event.event_id === 'the_smith') {
+    bodyHtml = _renderTheSmith(event, player);
+  } else if (event.event_id === 'bandits') {
+    bodyHtml = _renderBandits(event);
+  } else if (event.event_id === 'thief') {
+    bodyHtml = _renderThief(event);
+  } else if (event.event_id === 'fairy_king') {
+    bodyHtml = _renderFairyKing(event, player);
+  }
+
+  overlay.innerHTML = `
+    <div class="mystery-modal">
+      <div class="mystery-header">
+        <h2 class="mystery-title">${event.name}</h2>
+        <p class="mystery-desc">${event.description || ''}</p>
+      </div>
+      ${imgSrc ? `<img class="mystery-event-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
+      <div class="mystery-body">${bodyHtml}</div>
+    </div>`;
+  overlay.classList.remove('hidden');
+}
+
+function _renderMysteryBox(event, player) {
+  const packItems = _getUnifiedPack(player);
+  if (packItems.length === 0) {
+    return `<p class="mystery-info">You have nothing to wager!</p>
+            <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
+  }
+  const itemBtns = packItems.map((item, i) =>
+    `<button class="btn-secondary mystery-item-btn" onclick="_resolveMysteryBox(${i})">${item.name}</button>`
+  ).join('');
+  return `<p class="mystery-info">Choose an item from your pack to wager:</p>
+          <div class="mystery-item-grid">${itemBtns}</div>`;
+}
+
+function _renderTheWheel(event) {
+  return `<p class="mystery-info">Spin the wheel for a free prize!</p>
+          <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin the Wheel!</button>`;
+}
+
+function _renderTheSmith(event, player) {
+  const packItems = _getUnifiedPack(player);
+  if (event.tier < 3) {
+    if (packItems.length < 3) {
+      return `<p class="mystery-info">You need at least 3 pack items to trade. You have ${packItems.length}.</p>
+              <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
+    }
+    return `<p class="mystery-info">Select 3 items to trade for a Tier ${Math.min(event.tier + 1, 3)} item:</p>
+            <div class="mystery-item-grid" id="smith-grid">${packItems.map((item, i) =>
+              `<button class="btn-secondary mystery-item-btn smith-item" data-idx="${i}" onclick="_toggleSmithItem(this)">${item.name}</button>`
+            ).join('')}</div>
+            <button class="btn-primary" id="smith-confirm-btn" onclick="_resolveMysterySmith()" disabled>Trade (select 3)</button>`;
+  } else {
+    // Tier 3: choose equipped item to enhance
+    const equipped = _getAllEquipped(player);
+    if (equipped.length === 0) {
+      return `<p class="mystery-info">You have no equipped items to enhance.</p>
+              <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
+    }
+    return `<p class="mystery-info">Choose an equipped item to receive +3 Str:</p>
+            <div class="mystery-item-grid">${equipped.map((item, i) =>
+              `<button class="btn-secondary mystery-item-btn" onclick="_resolveSmithEnhance(${i})">${item.name} (+${item.strength_bonus})</button>`
+            ).join('')}</div>`;
+  }
+}
+
+function _renderBandits(event) {
+  return `<p class="mystery-info">Bandits ambush you and steal one of your equipped items!</p>
+          <button class="btn-primary" onclick="_resolveMysteryAuto('bandits')">Face the Bandits</button>`;
+}
+
+function _renderThief(event) {
+  return `<p class="mystery-info">A thief sneaks up and steals everything from your pack!</p>
+          <button class="btn-primary" onclick="_resolveMysteryAuto('thief')">Encounter the Thief</button>`;
+}
+
+function _renderFairyKing(event, player) {
+  const packItems = _getUnifiedPack(player);
+  const equipped = _getAllEquipped(player);
+  const allItems = [...packItems.map((item, i) => ({name: item.name, idx: i, source: 'pack'})),
+                    ...equipped.map((item, i) => ({name: item.name, idx: packItems.length + i, source: 'equip'}))];
+  if (allItems.length === 0) {
+    return `<p class="mystery-info">You have nothing to give — the Fairy King departs.</p>
+            <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
+  }
+  return `<p class="mystery-info">Choose an item to give to the Fairy King:</p>
+          <div class="mystery-item-grid">${allItems.map(item =>
+            `<button class="btn-secondary mystery-item-btn" onclick="_resolveFairyKing(${item.idx})">${item.name}</button>`
+          ).join('')}</div>`;
+}
+
+// Helper: get unified pack items
+function _getUnifiedPack(player) {
+  const items = [];
+  for (const p of (player.pack || [])) items.push(p);
+  for (const c of (player.consumables || [])) items.push(c);
+  for (const m of (player.captured_monsters || [])) items.push(m);
+  return items;
+}
+
+// Helper: get all equipped items (flat list)
+function _getAllEquipped(player) {
+  return [...(player.helmets || []), ...(player.chest_armor || []),
+          ...(player.leg_armor || []), ...(player.weapons || [])];
+}
+
+// Smith: toggle item selection (exactly 3)
+let _smithSelected = new Set();
+function _toggleSmithItem(btn) {
+  const idx = parseInt(btn.dataset.idx);
+  if (_smithSelected.has(idx)) {
+    _smithSelected.delete(idx);
+    btn.classList.remove('selected');
+  } else {
+    if (_smithSelected.size >= 3) return;
+    _smithSelected.add(idx);
+    btn.classList.add('selected');
+  }
+  const confirmBtn = document.getElementById('smith-confirm-btn');
+  if (confirmBtn) {
+    confirmBtn.disabled = _smithSelected.size !== 3;
+    confirmBtn.textContent = _smithSelected.size === 3 ? 'Trade!' : `Trade (select ${3 - _smithSelected.size} more)`;
+  }
+}
+
+// --- Resolution handlers ---
+
+async function _resolveMysteryBox(wagerIndex) {
+  await _postResolveMystery({action: 'open', wager_index: wagerIndex});
+}
+
+async function _resolveMysteryWheel() {
+  await _postResolveMystery({action: 'spin'});
+}
+
+async function _resolveMysterySmith() {
+  const indices = Array.from(_smithSelected).sort((a,b) => b - a);
+  _smithSelected.clear();
+  await _postResolveMystery({action: 'smith', smith_indices: indices});
+}
+
+async function _resolveSmithEnhance(equipIndex) {
+  await _postResolveMystery({action: 'smith', smith_equip_index: equipIndex, smith_indices: []});
+}
+
+async function _resolveMysteryAuto(eventType) {
+  await _postResolveMystery({action: 'accept'});
+}
+
+async function _resolveFairyKing(giveIndex) {
+  await _postResolveMystery({action: 'give', wager_index: giveIndex});
+}
+
+async function _resolveMysterySkip() {
+  await _postResolveMystery({action: 'skip'});
+}
+
+async function _postResolveMystery(body) {
+  try {
+    const resp = await fetch('/api/resolve_mystery', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) { console.error('resolve_mystery failed', resp.status); return; }
+    const data = await resp.json();
+    if (data.state) applyState(data.state);
+
+    if (data.phase === 'combat') {
+      playMusic('Battle Music.wav');
+      showPreFightScene(data.combat_info, data.state);
+    } else if (data.phase === 'offer_chest') {
+      _pendingOfferData = data.offer;
+      showChestModal(data.offer, {});
+    } else {
+      // done / trait / nothing
+      const overlay = document.getElementById('battle-overlay');
+      const resultLabel = data.mystery_result || 'Mystery resolved!';
+      overlay.innerHTML = `
+        <div class="mystery-modal">
+          <h2 class="mystery-title">Mystery Result</h2>
+          <p class="mystery-result-text">${resultLabel}</p>
+          <button class="btn-primary" onclick="_closeMysteryResult()">Continue</button>
+        </div>`;
+      overlay.classList.remove('hidden');
+    }
+  } catch (err) {
+    console.error('resolve_mystery error:', err);
+  }
+}
+
+function _closeMysteryResult() {
+  document.getElementById('battle-overlay').classList.add('hidden');
+  _pendingMysteryEvent = null;
+  _resumeTierMusic(gameState);
+  loadAndRenderAbilities();
+  _checkPendingMinions(gameState);
+}
+
+// ================================================================ MINION REPLACEMENT MODAL
+
+let _minionReplaceDone = null;
+
+function _checkPendingMinions(state) {
+  if (!state) return;
+  const player = state.players.find(p => p.is_current) || state.players[0];
+  if (player.pending_trait_minions && player.pending_trait_minions.length > 0) {
+    _showMinionReplacementModal(player);
+  }
+}
+
+function _showMinionReplacementModal(player, onDone) {
+  if (onDone) _minionReplaceDone = onDone;
+  const pending = player.pending_trait_minions[0];
+  const overlay = document.getElementById('battle-overlay');
+  const currentMinions = player.minions || [];
+  const slots = currentMinions.map((m, i) => {
+    const img = m.card_image ? `<img class="ps-slot-card-img" src="/images/${m.card_image}" alt="${m.name}" style="width:80px;height:auto;border-radius:6px;margin-bottom:4px" onerror="this.style.display='none'">` : '';
+    return `<button class="btn-secondary mystery-item-btn" onclick="_resolveMinion(${i})">
+      ${img}<div>${m.name}</div><div style="font-size:0.85em;color:var(--text-dim)">+${m.strength_bonus} Str</div>
+    </button>`;
+  }).join('');
+
+  const pendingImg = pending.card_image ? `<img src="/images/${pending.card_image}" alt="${pending.name}" style="width:120px;height:auto;border-radius:8px;margin:8px auto;display:block" onerror="this.style.display='none'">` : '';
+
+  overlay.innerHTML = `
+    <div class="mystery-modal">
+      <h2 class="mystery-title">Minion Slots Full!</h2>
+      <p class="mystery-info">${pending.name} (+${pending.strength_bonus} Str) wants to join your party, but you have no room.</p>
+      ${pendingImg}
+      <p class="mystery-info">Choose a minion to replace:</p>
+      <div class="mystery-item-grid">${slots}</div>
+      <button class="btn-secondary" onclick="_resolveMinion(-1)" style="margin-top:10px">Discard ${pending.name}</button>
+    </div>`;
+  overlay.classList.remove('hidden');
+}
+
+async function _resolveMinion(replaceIndex) {
+  try {
+    const body = replaceIndex < 0
+      ? {discard: true}
+      : {replace_index: replaceIndex};
+    const resp = await fetch('/api/resolve_minion', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) { console.error('resolve_minion failed', resp.status); return; }
+    const data = await resp.json();
+    if (data.state) {
+      gameState = data.state;
+      applyState(data.state);
+    }
+    // Check if more pending minions remain
+    const player = data.state?.players?.find(p => p.is_current);
+    if (player && player.pending_trait_minions && player.pending_trait_minions.length > 0) {
+      _showMinionReplacementModal(player);
+    } else {
+      document.getElementById('battle-overlay').classList.add('hidden');
+      if (_minionReplaceDone) {
+        const cb = _minionReplaceDone;
+        _minionReplaceDone = null;
+        cb();
+      }
+    }
+  } catch (err) {
+    console.error('resolveMinion error:', err);
+  }
+}
+
 
 // ================================================================ INIT
 window.addEventListener('DOMContentLoaded', initSetup);
