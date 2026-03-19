@@ -1896,7 +1896,8 @@ class Game:
                 or not any(c.effect_id == e.locked_by_curse_id for c in player.curses)
             ]
             pack_items = list(player.pack)
-            if unlocked or pack_items:
+            consumable_items = list(player.consumables)
+            if unlocked or pack_items or consumable_items:
                 self._pending_offer = {
                     "type": "rake_it_in",
                     "sub_type": offer_type,
@@ -1914,6 +1915,7 @@ class Game:
                     "sub_type": offer_type,
                     "equips": [_item_to_dict(e) for e in unlocked],
                     "pack_items": [_item_to_dict(i) for i in pack_items],
+                    "consumable_items": [{"name": c.name, "card_image": None} for c in consumable_items],
                     "shop_remaining": [_item_to_dict(i) for i in shop_remaining],
                     "moved_from": pending["moved_from"],
                     "moved_to": pending["moved_to"],
@@ -2002,6 +2004,13 @@ class Game:
                     log.append(f"  Rake It In!: discarded {discarded.name} from pack.")
                 else:
                     log.append("  Rake It In!: invalid pack discard choice \u2014 skipping.")
+                    use_it = False
+            elif discard_slot == "consumable":
+                if 0 <= discard_idx < len(player.consumables):
+                    discarded = player.consumables.pop(discard_idx)
+                    log.append(f"  Rake It In!: discarded {discarded.name} from consumables.")
+                else:
+                    log.append("  Rake It In!: invalid consumable discard choice \u2014 skipping.")
                     use_it = False
             else:
                 slot_map = {

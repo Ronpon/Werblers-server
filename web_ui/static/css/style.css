@@ -2966,6 +2966,14 @@ body {
   margin-bottom: 14px;
   font-size: 1.05em;
 }
+.mystery-section-label {
+  font-family: 'Cinzel', serif;
+  font-size: 0.85em;
+  color: var(--gold);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin: 12px 0 6px;
+}
 .mystery-outcome-text {
   color: var(--gold-light);
   font-size: 1.2em;

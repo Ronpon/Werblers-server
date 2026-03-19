@@ -199,6 +199,10 @@ def api_resolve_offer():
             {**i, "card_image": _item_card_image_from_dict(i)}
             for i in result.get("pack_items", [])
         ]
+        consumable_items = [
+            {**i, "card_image": _consumable_card_image(i.get("name", ""))}
+            for i in result.get("consumable_items", [])
+        ]
         shop_remaining = [
             {**i, "card_image": _item_card_image_from_dict(i)}
             for i in result.get("shop_remaining", [])
@@ -208,6 +212,7 @@ def api_resolve_offer():
             "sub_type": result.get("sub_type", "chest"),
             "equips": equips,
             "pack_items": pack_items,
+            "consumable_items": consumable_items,
             "shop_remaining": shop_remaining,
             "state": _build_state(),
             "log": combined_log,
@@ -398,6 +403,7 @@ def _api_resolve_mystery_inner():
         outcome["stolen_items"] = result["items"]
     if result.get("trait") and hasattr(result["trait"], "name"):
         outcome["trait_name"] = result["trait"].name
+        outcome["trait_description"] = C.TRAIT_DESCRIPTIONS.get(result["trait"].name, "")
     if result.get("curse_name"):
         outcome["curse_name"] = result["curse_name"]
     return jsonify(outcome)

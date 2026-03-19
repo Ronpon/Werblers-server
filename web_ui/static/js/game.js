@@ -1400,6 +1400,7 @@ function showRakeItInModal(data) {
   const subType = data.sub_type || 'chest';
   const equips = data.equips || [];
   const packItems = data.pack_items || [];
+  const consumableItems = data.consumable_items || [];
   const shopRemaining = data.shop_remaining || [];
 
   const equipsHtml = equips.map((e, i) => {
@@ -1417,6 +1418,15 @@ function showRakeItInModal(data) {
       return `<div class="rake-equip-btn" data-slot="pack" data-idx="${i}" onclick="rakeSelectDiscard('pack',${i},this)">
         ${img}
         <div class="rake-item-name">${p.name}</div>
+      </div>`;
+    }).join('')}</div>` : '';
+
+  const consumableHtml = consumableItems.length > 0 ? `<div class="rake-section-label">Or discard a consumable:</div>
+    <div class="rake-items-row">${consumableItems.map((c, i) => {
+      const img = c.card_image ? `<img class="rake-item-thumb" src="/images/${c.card_image}" alt="${c.name}">` : '';
+      return `<div class="rake-equip-btn" data-slot="consumable" data-idx="${i}" onclick="rakeSelectDiscard('consumable',${i},this)">
+        ${img}
+        <div class="rake-item-name">${c.name}</div>
       </div>`;
     }).join('')}</div>` : '';
 
@@ -1446,7 +1456,7 @@ function showRakeItInModal(data) {
 
   modal.querySelector('.rake-desc').textContent = descText;
   modal.querySelector('.rake-equips-row').innerHTML = equipsHtml;
-  modal.querySelector('.rake-shop-section').innerHTML = packHtml + shopHtml;
+  modal.querySelector('.rake-shop-section').innerHTML = packHtml + consumableHtml + shopHtml;
   modal.classList.remove('hidden');
 }
 
@@ -3116,23 +3126,31 @@ async function _mysteryBoxDecline() {
 function _renderMysteryBox(event, player) {
   const packItems = _getUnifiedPack(player);
   const equipped = _getAllEquipped(player);
-  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
-                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
-  if (allItems.length === 0) {
+  if (packItems.length === 0 && equipped.length === 0) {
     return `<p class="mystery-info">You have nothing to wager!</p>
             <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>`;
   }
-  const itemBtns = allItems.map(item => {
+  function _makeMysteryBtn(item, idx) {
     const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
-    return `<div class="mystery-selectable-item" data-idx="${item.idx}" onclick="_selectMysteryItem(${item.idx}, this)">
+    return `<div class="mystery-selectable-item" data-idx="${idx}" onclick="_selectMysteryItem(${idx}, this)">
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
-  }).join('');
-  return `<p class="mystery-info">Choose an item to discard:</p>
-          <div class="mystery-item-grid">${itemBtns}</div>
-          <div class="mystery-btn-row">
-            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Discard &amp; Open</button>
-          </div>`;
+  }
+  let html = '<p class="mystery-info">Choose an item to discard:</p>';
+  if (packItems.length > 0) {
+    html += `<div class="mystery-section-label">Pack</div><div class="mystery-item-grid">${
+      packItems.map((item, i) => _makeMysteryBtn({name: item.name, img: item.card_image}, i)).join('')
+    }</div>`;
+  }
+  if (equipped.length > 0) {
+    html += `<div class="mystery-section-label">Equipped</div><div class="mystery-item-grid">${
+      equipped.map((item, i) => _makeMysteryBtn({name: item.name, img: item.card_image}, packItems.length + i)).join('')
+    }</div>`;
+  }
+  html += `<div class="mystery-btn-row">
+    <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Discard &amp; Open</button>
+  </div>`;
+  return html;
 }
 
 function _renderTheWheel(event) {
@@ -3269,23 +3287,30 @@ function _beggarShowItemPicker() {
   if (!player) return;
   const packItems = _getUnifiedPack(player);
   const equipped = _getAllEquipped(player);
-  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
-                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
   _mysterySelectedIdx = -1;
-  const itemBtns = allItems.map(item => {
+  function _makeBeggarBtn(item, idx) {
     const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
-    return `<div class="mystery-selectable-item" data-idx="${item.idx}" onclick="_selectMysteryItem(${item.idx}, this)">
+    return `<div class="mystery-selectable-item" data-idx="${idx}" onclick="_selectMysteryItem(${idx}, this)">
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
-  }).join('');
+  }
   const bodyEl = document.querySelector('.mystery-fs-body');
   if (!bodyEl) return;
-  bodyEl.innerHTML = `
-    <p class="mystery-info">Choose an item to give:</p>
-    <div class="mystery-item-grid">${itemBtns}</div>
-    <div class="mystery-btn-row">
-      <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveBeggarGive(_mysterySelectedIdx)" disabled>Give Item</button>
-    </div>`;
+  let html = '<p class="mystery-info">Choose an item to give:</p>';
+  if (packItems.length > 0) {
+    html += `<div class="mystery-section-label">Pack</div><div class="mystery-item-grid">${
+      packItems.map((item, i) => _makeBeggarBtn({name: item.name, img: item.card_image}, i)).join('')
+    }</div>`;
+  }
+  if (equipped.length > 0) {
+    html += `<div class="mystery-section-label">Equipped</div><div class="mystery-item-grid">${
+      equipped.map((item, i) => _makeBeggarBtn({name: item.name, img: item.card_image}, packItems.length + i)).join('')
+    }</div>`;
+  }
+  html += `<div class="mystery-btn-row">
+    <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveBeggarGive(_mysterySelectedIdx)" disabled>Give Item</button>
+  </div>`;
+  bodyEl.innerHTML = html;
 }
 
 // Shared item selection for events that need select-then-confirm
@@ -3456,6 +3481,9 @@ async function _postResolveMystery(body) {
         }
         _pendingMysteryEvent = null;
         _pendingOfferData = data.offer;
+        // IMPORTANT: hide the battle-overlay so the player-sheet placement overlay
+        // (z-index 250) is not blocked behind it (z-index 400).
+        document.getElementById('battle-overlay').classList.add('hidden');
         showChestModal(data.offer, {});
       });
     } else if (data.phase === 'beggar_thank') {
@@ -3552,9 +3580,11 @@ function _getMysteryOutcomeContent(data) {
         outcomeText = 'You got nothing! Good day sir!';
       } else if (prizeType === 'trait') {
         const monsterNameBox = data.monster_name || '';
+        const traitNameBox = data.trait_name || 'a mysterious trait';
+        const traitDescBox = data.trait_description ? `<br><span style="font-size:0.85em;color:var(--text-dim);font-style:italic">${data.trait_description}</span>` : '';
         outcomeText = monsterNameBox
-          ? `The box contained\u2026 a dead <strong>${monsterNameBox}</strong>! Its trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
-          : `The box contained\u2026 a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+          ? `The box contained\u2026 a dead <strong>${monsterNameBox}</strong>! Its trait is now yours: <strong>${traitNameBox}</strong>!${traitDescBox}`
+          : `The box contained\u2026 a trait: <strong>${traitNameBox}</strong>!${traitDescBox}`;
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `The box contained\u2026 <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'curse') {
@@ -3569,9 +3599,11 @@ function _getMysteryOutcomeContent(data) {
         outcomeText = 'You got nothing! Good day sir!';
       } else if (prizeType === 'trait') {
         const monsterName = data.monster_name || '';
+        const traitNameW = data.trait_name || 'a mysterious trait';
+        const traitDescW = data.trait_description ? `<br><span style="font-size:0.85em;color:var(--text-dim);font-style:italic">${data.trait_description}</span>` : '';
         outcomeText = monsterName
-          ? `You got a dead <strong>${monsterName}</strong>! Its trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
-          : `You got a mysterious trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+          ? `You got a dead <strong>${monsterName}</strong>! Its trait is now yours: <strong>${traitNameW}</strong>!${traitDescW}`
+          : `You got a mysterious trait: <strong>${traitNameW}</strong>!${traitDescW}`;
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `You got <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'curse') {
