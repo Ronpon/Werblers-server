@@ -313,51 +313,6 @@ def _api_resolve_mystery_inner():
         log.append(f"Unknown mystery event: {event_id}")
         result = {"prize_type": "nothing", "label": "Unknown event"}
 
-    # If the prize is a monster (or stronger monster), set up pending combat
-    if result.get("prize_type") in ("monster", "monster_up"):
-        monster = result["monster"]
-        m_tier = result.get("tier", tier)
-        _game._pending_offer = None
-        _game._prefight_str_bonus = 0
-        _game._prefight_monster_str_bonus = 0
-        other_players = [p for p in _game.players if p is not player]
-        _game._pending_combat = {
-            "type": "monster",
-            "monster": monster,
-            "effective_deck": _game.monster_decks[m_tier],
-            "other_players": other_players,
-            "level": m_tier,
-            "log": log,
-            "old_pos": po["moved_from"], "new_pos": po["moved_to"],
-            "card_value": po["card_played"], "tile_type": po["tile_type"],
-            "ill_come_in_again_count": 0,
-            "ill_come_in_again_available": False,
-            "from_mystery": True,
-        }
-        _male_bonus = monster.bonus_vs_male if (monster.bonus_vs_male and player.hero and player.hero.is_male) else 0
-        combat_info = {
-            "monster_name": monster.name,
-            "monster_strength": monster.strength + _male_bonus,
-            "monster_bonus_vs_male": _male_bonus,
-            "player_strength": player.combat_strength(),
-            "player_id": player.player_id,
-            "player_name": player.name,
-            "hero_id": player.hero.id.name if player.hero else None,
-            "category": "monster",
-            "level": m_tier,
-            "result": None,
-        }
-        _game._last_combat_info = combat_info
-        _last_log = log
-        return jsonify({
-            "phase": "combat",
-            "event_id": event_id,
-            "prize_type": result.get("prize_type", ""),
-            "mystery_result": result.get("label", ""),
-            "state": _build_state(),
-            "combat_info": _enrich_combat_info(combat_info),
-        })
-
     # If the prize is an item, set up a pending offer for placement
     if result.get("prize_type") == "item" and result.get("item"):
         item = result["item"]
@@ -443,9 +398,8 @@ def _api_resolve_mystery_inner():
         outcome["stolen_items"] = result["items"]
     if result.get("trait") and hasattr(result["trait"], "name"):
         outcome["trait_name"] = result["trait"].name
-    if result.get("monster_name"):
-        outcome["monster_name"] = result["monster_name"]
-        outcome["card_image"] = _monster_card_image(result["monster_name"])
+    if result.get("curse_name"):
+        outcome["curse_name"] = result["curse_name"]
     return jsonify(outcome)
 
 

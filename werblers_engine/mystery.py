@@ -129,21 +129,20 @@ def _roll_prize(tier: int, rng: random.Random) -> Prize:
     """Roll a random prize from the mystery prize table.
 
     Rarity bands:
-      common   (50%): same-tier item
-      uncommon (25%): same-tier monster
-      rare     (15%): tier+1 item (5%), nothing (5%), tier+1 monster (5%)
-      very_rare(10%): tier-3 item (5%), dead monster trait (5%)
+      common    (60%): same-tier item
+      uncommon  (10%): tier+1 item
+      rare      (21%): nothing (8%), curse (7%), trait (6%)
+      very_rare ( 9%): tier-3 item
     """
     up_tier = min(tier + 1, 3)
     table = [
         # (prize_type,   tier_offset, label,                          weight)
-        ("item",        0, f"Tier {tier} item",                      50),  # common
-        ("monster",     0, f"Tier {tier} monster",                    25),  # uncommon
-        ("item_up",     1, f"Tier {up_tier} item",                    5),  # rare
-        ("nothing",     0, "Nothing!",                                 5),  # rare
-        ("monster_up",  1, f"Tier {up_tier} monster",                  5),  # rare
-        ("item_t3",     0, "Tier 3 item",                              5),  # very rare
-        ("trait",       0, "Dead monster's trait",                      5),  # very rare
+        ("item",        0, f"Tier {tier} item",                      60),  # common
+        ("item_up",     1, f"Tier {up_tier} item",                   10),  # uncommon
+        ("nothing",     0, "Nothing!",                                 8),  # rare
+        ("curse",       0, "A curse!",                                 7),  # rare
+        ("trait",       0, "Dead monster's trait",                     6),  # rare
+        ("item_t3",     0, "Tier 3 item",                              9),  # very rare
     ]
     types   = [t[0] for t in table]
     weights = [t[3] for t in table]
@@ -426,15 +425,18 @@ def _materialise_prize(
             log.append("  Prize: item deck empty — nothing.")
             return {"prize_type": "nothing", "label": "Deck empty"}
 
-    elif prize.prize_type in ("monster", "monster_up"):
-        m_tier = prize.tier
-        monster = monster_decks[m_tier].draw()
-        if monster:
-            log.append(f"  Prize: {monster.name} (Tier {m_tier} monster) — prepare to fight!")
-            return {"prize_type": prize.prize_type, "monster": monster, "tier": m_tier, "label": prize.label}
+    elif prize.prize_type == "curse":
+        import copy as _copy
+        if C.CURSE_POOL:
+            curse = _copy.copy(rng.choice(C.CURSE_POOL))
+            player.curses.append(curse)
+            from . import effects as _fx2
+            _fx2.refresh_tokens(player)
+            log.append(f"  Prize: received curse '{curse.name}'!")
+            return {"prize_type": "curse", "curse_name": curse.name, "label": f"Curse: {curse.name}"}
         else:
-            log.append("  Prize: monster deck empty — lucky escape!")
-            return {"prize_type": "nothing", "label": "Monster deck empty"}
+            log.append("  Prize: no curses available — nothing.")
+            return {"prize_type": "nothing", "label": "Nothing"}
 
     elif prize.prize_type == "trait":
         # Draw a random dead monster and give its trait

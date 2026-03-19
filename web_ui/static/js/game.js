@@ -1503,20 +1503,7 @@ async function resolveRakeItIn(useIt) {
     _resumeTierMusic(data.state);
   }
   if (data.bonus_item) {
-    const bi = data.bonus_item;
-    const img = bi.card_image ? `<img class="consumable-modal-card-img" src="/images/${bi.card_image}" alt="${bi.name}" onclick="zoomCard(this.src)">` : '';
-    await new Promise(resolve => {
-      _showConsumableResultModal({
-        title: '🎁 Rake It In! Bonus Item',
-        monsterName: '',
-        monsterImg: '',
-        resultName: bi.name,
-        resultDesc: `+${bi.strength_bonus} Str`,
-        resultClass: 'result-trait',
-        onClose: resolve,
-      });
-    });
-    // Place the bonus item via the pending trait items flow (use the original player)
+    // Show "Received" card notification + placement prompt (same as normal item receipt)
     await _placePendingTraitItems(rakePlayerId);
   }
   await loadAndRenderAbilities();
@@ -3426,16 +3413,26 @@ async function _postResolveMystery(body) {
     });
     if (!resp.ok) {
       let errMsg = `HTTP ${resp.status}`;
+      let errData = {};
       try {
-        const errData = await resp.json();
+        errData = await resp.json();
         errMsg = errData.error || errMsg;
       } catch (_) {
         const rawText = await resp.text().catch(() => '');
         if (rawText) errMsg += '\n\n' + rawText.substring(0, 800);
       }
+      // Update state if provided (keeps game consistent)
+      if (errData.state) { gameState = errData.state; applyState(errData.state); }
       console.error('resolve_mystery failed', resp.status, errMsg);
-      alert(`Mystery event error:\n${errMsg}`);
-      _closeMysteryResult();
+      // For mystery box wager validation failure, stay on the wager screen so player can retry
+      const isWagerError = _pendingMysteryEvent?.event_id === 'mystery_box' && errMsg.includes('Invalid');
+      if (isWagerError) {
+        alert('Please select a valid item to wager.');
+        _showMysteryBoxWager();
+      } else {
+        alert(`Mystery event error:\n${errMsg}`);
+        _closeMysteryResult();
+      }
       return;
     }
     const data = await resp.json();
@@ -3449,15 +3446,7 @@ async function _postResolveMystery(body) {
     const _wheelFarewell = '"Congratulations or sorry that happened! Remember to spay and neuter your minions!"';
     const _boxFarewell = '"Wow, I\'m envious\u2026"';
 
-    if (data.phase === 'combat') {
-      // Monster prize — show announcement, then enter combat.
-      // Keep _pendingMysteryEvent alive so farewell works after combat.
-      _lastFightFromMystery = true;
-      await _showMysteryOutcome(data, () => {
-        playMusic('Battle Music.wav');
-        showPreFightScene(data.combat_info, data.state);
-      });
-    } else if (data.phase === 'offer_chest') {
+    if (data.phase === 'offer_chest') {
       // Item prize — show announcement, then item placement, then farewell
       const farewellQuote = isWheel ? _wheelFarewell : isMysteryBox ? _boxFarewell : null;
       await _showMysteryOutcome(data, () => {
@@ -3568,10 +3557,8 @@ function _getMysteryOutcomeContent(data) {
           : `The box contained\u2026 a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `The box contained\u2026 <strong>${itemName || 'an item'}</strong>!`;
-      } else if (prizeType === 'monster_up') {
-        outcomeText = 'The box contained\u2026 a strong monster! It leaps out!';
-      } else if (prizeType === 'monster') {
-        outcomeText = 'The box contained\u2026 a monster! It leaps out!';
+      } else if (prizeType === 'curse') {
+        outcomeText = `The box contained\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!`;
       } else {
         outcomeText = label || 'The mystery has been resolved.';
       }
@@ -3587,10 +3574,8 @@ function _getMysteryOutcomeContent(data) {
           : `You got a mysterious trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `You got <strong>${itemName || 'an item'}</strong>!`;
-      } else if (prizeType === 'monster_up') {
-        outcomeText = 'You got a strong monster!';
-      } else if (prizeType === 'monster') {
-        outcomeText = 'You got a monster!';
+      } else if (prizeType === 'curse') {
+        outcomeText = `You got\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!`;
       } else {
         outcomeText = label || 'The wheel has spoken.';
       }
