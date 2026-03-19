@@ -126,24 +126,40 @@ class Prize:
 
 
 def _roll_prize(tier: int, rng: random.Random) -> Prize:
-    """Roll a random prize from the mystery prize table."""
-    # Weighted table: (prize_type, extra_tier_offset, label, weight)
+    """Roll a random prize from the mystery prize table.
+
+    Rarity bands:
+      common   (50%): same-tier item
+      uncommon (25%): same-tier monster
+      rare     (15%): tier+1 item (5%), nothing (5%), tier+1 monster (5%)
+      very_rare(10%): tier-3 item (5%), dead monster trait (5%)
+    """
+    up_tier = min(tier + 1, 3)
     table = [
-        ("item",       0, f"Tier {tier} item",             50),   # common
-        ("monster",    0, f"Tier {tier} monster",           15),   # uncommon
-        ("monster_up", 1, f"Tier {min(tier+1, 3)} monster", 10),  # rare
-        ("nothing",    0, "Nothing!",                       15),   # rare
-        ("trait",      0, "Dead monster's trait",            10),  # very rare
+        # (prize_type,   tier_offset, label,                          weight)
+        ("item",        0, f"Tier {tier} item",                      50),  # common
+        ("monster",     0, f"Tier {tier} monster",                    25),  # uncommon
+        ("item_up",     1, f"Tier {up_tier} item",                    5),  # rare
+        ("nothing",     0, "Nothing!",                                 5),  # rare
+        ("monster_up",  1, f"Tier {up_tier} monster",                  5),  # rare
+        ("item_t3",     0, "Tier 3 item",                              5),  # very rare
+        ("trait",       0, "Dead monster's trait",                      5),  # very rare
     ]
-    types = [t[0] for t in table]
+    types   = [t[0] for t in table]
     weights = [t[3] for t in table]
-    labels = [t[2] for t in table]
+    labels  = [t[2] for t in table]
 
     idx = rng.choices(range(len(types)), weights=weights, k=1)[0]
+    p_type = types[idx]
+    # Normalise item_up and item_t3 into "item" with the correct tier
+    if p_type == "item_up":
+        return Prize(prize_type="item", tier=up_tier, label=labels[idx])
+    if p_type == "item_t3":
+        return Prize(prize_type="item", tier=3, label=labels[idx])
     prize_tier = tier + table[idx][1]
     if prize_tier > 3:
         prize_tier = 3
-    return Prize(prize_type=types[idx], tier=prize_tier, label=labels[idx])
+    return Prize(prize_type=p_type, tier=prize_tier, label=labels[idx])
 
 
 # ---------------------------------------------------------------------------
@@ -433,12 +449,13 @@ def _materialise_prize(
             trait = C.trait_for_monster(chosen)
             if trait:
                 player.traits.append(trait)
-                log.append(f"  Prize: gained trait '{trait.name}' from {chosen.name}!")
+                log.append(f"  Oops, it's already dead — take its curse!")
+                log.append(f"  You got a dead {chosen.name}! Gained trait: {trait.name}")
                 trait_items, trait_minions = _fx.on_trait_gained(player, trait, log)
                 player.pending_trait_items.extend(trait_items)
                 player.pending_trait_minions.extend(trait_minions)
                 _fx.refresh_tokens(player)
-                return {"prize_type": "trait", "trait": trait, "monster_name": chosen.name, "label": f"Trait: {trait.name}"}
+                return {"prize_type": "trait", "trait": trait, "monster_name": chosen.name, "label": f"You got a dead {chosen.name}! You got {trait.name}!"}
         # Fallback: draw from trait deck
         trait = trait_deck.draw()
         if trait:

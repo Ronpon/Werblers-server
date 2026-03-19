@@ -1359,6 +1359,22 @@ async function resolveOffer(choices) {
     showRakeItInModal(data);
     return;
   }
+  // If there's a pending mystery farewell (item prize from Wheel/Box), show it now
+  if (_pendingMysteryFarewell) {
+    const fw = _pendingMysteryFarewell;
+    _pendingMysteryFarewell = null;
+    if (data.state) { gameState = data.state; }
+    await _showCharacterFarewell(fw.event, fw.quote, () => {
+      document.getElementById('battle-overlay').classList.add('hidden');
+      if (gameState) {
+        viewingPlayerId = gameState.current_player_id;
+        applyState(gameState);
+      }
+      _resumeTierMusic(gameState);
+      loadAndRenderAbilities();
+    });
+    return;
+  }
   viewingPlayerId = data.state.current_player_id;
   applyState(data.state);
   _resumeTierMusic(data.state);
@@ -2159,21 +2175,39 @@ async function _pickPlayerForPackCurse(packIndex, targetPlayerId) {
 let _lastFightWasSummon = false;
 let _lastFightFromMystery = false;
 async function doFight() {
-  const resp = await fetch('/api/fight', { method: 'POST' });
-  const data = await resp.json();
-  if (data.state) gameState = data.state;
-  _lastFightWasSummon = data.phase === 'summoned_done';
-  _lastFightFromMystery = !!(data.combat_info && data.combat_info.from_mystery);
-  if (data.combat_info) {
-    showBattleScene(data.combat_info, data.state);
-  } else {
-    document.getElementById('battle-overlay').classList.add('hidden');
-    if (gameState) {
-      viewingPlayerId = gameState.current_player_id;
-      applyState(gameState);
-      _resumeTierMusic();
-      await loadAndRenderAbilities();
+  try {
+    const resp = await fetch('/api/fight', { method: 'POST' });
+    if (!resp.ok) {
+      let errMsg = `HTTP ${resp.status}`;
+      try {
+        const errData = await resp.json();
+        errMsg = errData.error || errMsg;
+      } catch (_) {
+        const rawText = await resp.text().catch(() => '');
+        if (rawText) errMsg += '\n\n' + rawText.substring(0, 800);
+      }
+      console.error('fight failed:', errMsg);
+      alert(`Fight error:\n${errMsg}`);
+      return;
     }
+    const data = await resp.json();
+    if (data.state) gameState = data.state;
+    _lastFightWasSummon = data.phase === 'summoned_done';
+    _lastFightFromMystery = !!(data.combat_info && data.combat_info.from_mystery);
+    if (data.combat_info) {
+      showBattleScene(data.combat_info, data.state);
+    } else {
+      document.getElementById('battle-overlay').classList.add('hidden');
+      if (gameState) {
+        viewingPlayerId = gameState.current_player_id;
+        applyState(gameState);
+        _resumeTierMusic();
+        await loadAndRenderAbilities();
+      }
+    }
+  } catch (err) {
+    console.error('doFight error:', err);
+    alert(`Fight error: ${err.message || err}`);
   }
 }
 // ================================================================ BATTLE SCENE
@@ -2319,19 +2353,26 @@ async function _placePendingTraitItems(forPlayerId) {
 }
 
 async function _finishBattleContinue() {
-  // If the fight came from a mystery event (e.g., Wheel prize), show the character
-  // farewell screen before returning to the overworld.
+  // If the fight came from a mystery event (e.g., Wheel or Mystery Box prize),
+  // show the character farewell screen before returning to the overworld.
   if (_lastFightFromMystery && _pendingMysteryEvent) {
     _lastFightFromMystery = false;
     const ev = _pendingMysteryEvent;
+    _pendingMysteryEvent = null;
     const quote = ev.event_id === 'the_wheel'
-      ? '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"'
+      ? '"Congratulations or sorry that happened! Remember to spay and neuter your minions!"'
       : ev.event_id === 'mystery_box'
-      ? '"Heh! A monster from the box! The box never promised it would be safe!"'
+      ? '"Wow, I\'m envious\u2026"'
       : '"The outcome has been decided."';
     await _showCharacterFarewell(ev, quote, () => {});
   }
   _lastFightFromMystery = false;
+  // If there's a pending mystery farewell (from item prize placement), show it now
+  if (_pendingMysteryFarewell) {
+    const fw = _pendingMysteryFarewell;
+    _pendingMysteryFarewell = null;
+    await _showCharacterFarewell(fw.event, fw.quote, () => {});
+  }
   document.getElementById('battle-overlay').classList.add('hidden');
   if (gameState) {
     viewingPlayerId = gameState.current_player_id;
@@ -3032,9 +3073,13 @@ function showMysteryEventModal(event, state) {
 
   let bodyHtml = '';
   if (event.event_id === 'mystery_box') {
-    // Step 1: just show a Continue button so the player sees the background first
-    bodyHtml = `<div class="mystery-btn-row">
-      <button class="btn-primary" onclick="_showMysteryBoxWager()">Continue</button>
+    // Step 1: intro — "Hey, wanna know what's in this box?"
+    bodyHtml = `<div class="mystery-speech-bubble">
+      <p>"Hey, wanna know what's in this box?"</p>
+    </div>
+    <div class="mystery-btn-row">
+      <button class="btn-primary" onclick="_showMysteryBoxWager()">Yes (discard one item)</button>
+      <button class="btn-secondary" onclick="_mysteryBoxDecline()">Decline</button>
     </div>`;
   } else if (event.event_id === 'the_wheel') {
     bodyHtml = _renderTheWheel(event);
@@ -3063,12 +3108,22 @@ function showMysteryEventModal(event, state) {
   overlay.classList.remove('hidden');
 }
 
-// Called when the player clicks Continue on the Mystery Box intro screen.
+// Called when the player clicks Yes on the Mystery Box intro screen.
 function _showMysteryBoxWager() {
   const player = gameState?.players?.find(p => p.is_current) || gameState?.players?.[0];
   const bodyEl = document.querySelector('.mystery-fs-body');
   if (!bodyEl) return;
   bodyEl.innerHTML = _renderMysteryBox(_pendingMysteryEvent, player);
+}
+
+async function _mysteryBoxDecline() {
+  // "A pity…"
+  await _showCharacterFarewell(
+    _pendingMysteryEvent,
+    '"A pity\u2026"',
+    () => {}
+  );
+  await _postResolveMystery({action: 'skip'});
 }
 
 function _renderMysteryBox(event, player) {
@@ -3086,14 +3141,10 @@ function _renderMysteryBox(event, player) {
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
   }).join('');
-  return `<div class="mystery-speech-bubble">
-            <p>"Wager an item and open the box — could be treasure, could be trouble!"</p>
-          </div>
-          <p class="mystery-info">Choose an item to wager:</p>
+  return `<p class="mystery-info">Choose an item to discard:</p>
           <div class="mystery-item-grid">${itemBtns}</div>
           <div class="mystery-btn-row">
-            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Wager Item</button>
-            <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
+            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Discard &amp; Open</button>
           </div>`;
 }
 
@@ -3105,8 +3156,19 @@ function _renderTheWheel(event) {
           </div>
           <img class="mystery-fs-img" src="${imgSrc}" alt="The Wheel" onerror="this.style.display='none'" style="margin:12px auto;display:block">
           <div class="mystery-btn-row">
-            <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin the Wheel!</button>
+            <button class="btn-primary mystery-spin-btn" onclick="_resolveMysteryWheel()">Spin</button>
+            <button class="btn-secondary" onclick="_wheelDecline()">Decline</button>
           </div>`;
+}
+
+async function _wheelDecline() {
+  // "Well, coward, don't forget to have your minions spayed and neutered."
+  await _showCharacterFarewell(
+    _pendingMysteryEvent,
+    '"Well, coward, don\'t forget to have your minions spayed and neutered."',
+    () => {}
+  );
+  await _postResolveMystery({action: 'skip'});
 }
 
 function _renderTheSmith(event, player) {
@@ -3363,9 +3425,16 @@ async function _postResolveMystery(body) {
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
-      const errData = await resp.json().catch(() => ({}));
-      console.error('resolve_mystery failed', resp.status, errData);
-      alert(`Mystery event error: ${errData.error || resp.status}`);
+      let errMsg = `HTTP ${resp.status}`;
+      try {
+        const errData = await resp.json();
+        errMsg = errData.error || errMsg;
+      } catch (_) {
+        const rawText = await resp.text().catch(() => '');
+        if (rawText) errMsg += '\n\n' + rawText.substring(0, 800);
+      }
+      console.error('resolve_mystery failed', resp.status, errMsg);
+      alert(`Mystery event error:\n${errMsg}`);
       _closeMysteryResult();
       return;
     }
@@ -3376,16 +3445,26 @@ async function _postResolveMystery(body) {
     const isBandits = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'bandits';
     const isMysteryBox = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'mystery_box';
 
+    // Determine the farewell quote for this event
+    const _wheelFarewell = '"Congratulations or sorry that happened! Remember to spay and neuter your minions!"';
+    const _boxFarewell = '"Wow, I\'m envious\u2026"';
+
     if (data.phase === 'combat') {
-      // Show prize announcement ("You win… a monster!"), then proceed to fight.
-      // Keep _pendingMysteryEvent alive so the farewell screen works after combat.
+      // Monster prize — show announcement, then enter combat.
+      // Keep _pendingMysteryEvent alive so farewell works after combat.
+      _lastFightFromMystery = true;
       await _showMysteryOutcome(data, () => {
         playMusic('Battle Music.wav');
         showPreFightScene(data.combat_info, data.state);
       });
     } else if (data.phase === 'offer_chest') {
-      // Show outcome first, then proceed to chest on Continue
+      // Item prize — show announcement, then item placement, then farewell
+      const farewellQuote = isWheel ? _wheelFarewell : isMysteryBox ? _boxFarewell : null;
       await _showMysteryOutcome(data, () => {
+        // Stash farewell info so we show it after chest resolution
+        if (farewellQuote) {
+          _pendingMysteryFarewell = { event: _pendingMysteryEvent, quote: farewellQuote };
+        }
         _pendingMysteryEvent = null;
         _pendingOfferData = data.offer;
         showChestModal(data.offer, {});
@@ -3395,32 +3474,28 @@ async function _postResolveMystery(body) {
     } else if (data.phase === 'fairy_king_reveal') {
       _showFairyKingReveal(data);
     } else {
-      // done — show outcome screen then optional farewell
+      // done — show outcome screen then farewell
       if (data.prize_type === 'skip') {
         _closeMysteryResult();
       } else if (isWheel) {
-        // Wheel: prize announcement, then goblin farewell
+        // Wheel: nothing / trait / etc → announcement, then farewell
         await _showMysteryOutcome(data, async () => {
           await _showCharacterFarewell(
             _pendingMysteryEvent,
-            '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"',
+            _wheelFarewell,
             () => _closeMysteryResult()
           );
         });
       } else if (isMysteryBox) {
-        // Mystery Box: prize announcement, then character farewell
+        // Mystery Box: nothing / trait → announcement, then farewell
         await _showMysteryOutcome(data, async () => {
-          const farewell = data.prize_type === 'nothing'
-            ? '"Nothing in there but dust! Come back when you have something worth wagering!"'
-            : '"Well, well\u2026 I hope that was worth the wager! Come back any time!"';
           await _showCharacterFarewell(
             _pendingMysteryEvent,
-            farewell,
+            _boxFarewell,
             () => _closeMysteryResult()
           );
         });
       } else if (isBandits && data.prize_type === 'stolen') {
-        // Bandits: stolen card screen, then bandit farewell
         await _showMysteryOutcome(data, async () => {
           await _showCharacterFarewell(
             _pendingMysteryEvent,
@@ -3436,6 +3511,9 @@ async function _postResolveMystery(body) {
     console.error('resolve_mystery error:', err);
   }
 }
+
+// Pending farewell info for events that need to show a farewell AFTER item placement
+let _pendingMysteryFarewell = null;
 
 // Show a character farewell/quote screen using the event's own image as background.
 async function _showCharacterFarewell(event, quoteText, onContinue) {
@@ -3482,18 +3560,18 @@ function _getMysteryOutcomeContent(data) {
     case 'mystery_box':
       title = 'Mystery Box';
       if (prizeType === 'nothing') {
-        outcomeText = 'You win\u2026 nothing! The box is empty.';
+        outcomeText = 'You got nothing! Good day sir!';
       } else if (prizeType === 'trait') {
         const monsterNameBox = data.monster_name || '';
         outcomeText = monsterNameBox
-          ? `You win\u2026 a dead monster! <strong>${monsterNameBox}</strong>'s trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
-          : `You win\u2026 a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
-      } else if (prizeType === 'item') {
-        outcomeText = `You win\u2026 <strong>${itemName || 'an item'}</strong>!`;
+          ? `The box contained\u2026 a dead <strong>${monsterNameBox}</strong>! Its trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
+          : `The box contained\u2026 a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+      } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
+        outcomeText = `The box contained\u2026 <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'monster_up') {
-        outcomeText = 'You win\u2026 a strong monster! It leaps from the box!';
+        outcomeText = 'The box contained\u2026 a strong monster! It leaps out!';
       } else if (prizeType === 'monster') {
-        outcomeText = 'You win\u2026 a monster! It leaps from the box!';
+        outcomeText = 'The box contained\u2026 a monster! It leaps out!';
       } else {
         outcomeText = label || 'The mystery has been resolved.';
       }
@@ -3501,18 +3579,18 @@ function _getMysteryOutcomeContent(data) {
     case 'the_wheel':
       title = 'The Wheel';
       if (prizeType === 'nothing') {
-        outcomeText = 'You win… nothing!';
+        outcomeText = 'You got nothing! Good day sir!';
       } else if (prizeType === 'trait') {
         const monsterName = data.monster_name || '';
         outcomeText = monsterName
-          ? `You win… a dead monster! <strong>${monsterName}</strong>'s trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
-          : `You win… a mysterious trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
-      } else if (prizeType === 'item') {
-        outcomeText = `You win… <strong>${itemName || 'an item'}</strong>!`;
+          ? `You got a dead <strong>${monsterName}</strong>! Its trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
+          : `You got a mysterious trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+      } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
+        outcomeText = `You got <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'monster_up') {
-        outcomeText = `You win… a strong monster!`;
+        outcomeText = 'You got a strong monster!';
       } else if (prizeType === 'monster') {
-        outcomeText = `You win… a monster!`;
+        outcomeText = 'You got a monster!';
       } else {
         outcomeText = label || 'The wheel has spoken.';
       }

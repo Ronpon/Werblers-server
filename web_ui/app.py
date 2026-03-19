@@ -229,6 +229,16 @@ def api_resolve_mystery():
         smith_indices:  list[int]  (3 pack slot indices for the smith trade)
         smith_equip_index: int  (equipped item index for tier-3 smith enhancement)
     """
+    import traceback as _tb
+    global _last_log, _pending_log
+    try:
+        return _api_resolve_mystery_inner()
+    except Exception as exc:
+        tb = _tb.format_exc()
+        _tb.print_exc()
+        return jsonify({"error": f"Server error in resolve_mystery: {exc}\n\nTraceback:\n{tb}"}), 500
+
+def _api_resolve_mystery_inner():
     global _last_log, _pending_log
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
@@ -1107,17 +1117,24 @@ def api_flee():
 def api_fight():
     """Resolve the pending monster combat."""
     global _last_log
-    if _game is None:
-        return jsonify({"error": "No game in progress"}), 400
-    if _game._pending_combat is None:
-        return jsonify({"error": "No pending combat"}), 400
-    result = _game.fight()
-    _last_log = result.get("log", [])
-    combat_info = result.get("combat_info")
-    if combat_info:
-        combat_info = _enrich_combat_info(combat_info)
-    phase = "summoned_done" if result.get("summoned_monster") else "done"
-    return jsonify({"phase": phase, "state": _build_state(), "combat_info": combat_info})
+    try:
+        if _game is None:
+            return jsonify({"error": "No game in progress"}), 400
+        if _game._pending_combat is None:
+            return jsonify({"error": "No pending combat"}), 400
+        from_mystery = _game._pending_combat.get("from_mystery", False)
+        result = _game.fight()
+        _last_log = result.get("log", [])
+        combat_info = result.get("combat_info")
+        if combat_info:
+            combat_info = _enrich_combat_info(combat_info)
+        phase = "summoned_done" if result.get("summoned_monster") else "done"
+        return jsonify({"phase": phase, "state": _build_state(), "combat_info": combat_info})
+    except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        traceback.print_exc()
+        return jsonify({"error": f"Server error during fight: {exc}\n\nTraceback:\n{tb}"}), 500
 
 @app.route("/api/use_eight_lives", methods=["POST"])
 def api_use_eight_lives():

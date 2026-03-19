@@ -1236,7 +1236,7 @@ class Game:
         # 15.5 MYSTERY — pause for interactive mystery event
         if actual_type == TileType.MYSTERY:
             from . import mystery as _mys
-            event = _mys.roll_mystery_event(new_pos, player=self._current_player)
+            event = _mys.roll_mystery_event(new_pos, player=player)
             log.append(f"Mystery Square: {event.name}!")
             self._pending_offer = {
                 "type": "mystery",
