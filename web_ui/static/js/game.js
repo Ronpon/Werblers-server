@@ -3032,7 +3032,10 @@ function showMysteryEventModal(event, state) {
 
   let bodyHtml = '';
   if (event.event_id === 'mystery_box') {
-    bodyHtml = _renderMysteryBox(event, player);
+    // Step 1: just show a Continue button so the player sees the background first
+    bodyHtml = `<div class="mystery-btn-row">
+      <button class="btn-primary" onclick="_showMysteryBoxWager()">Continue</button>
+    </div>`;
   } else if (event.event_id === 'the_wheel') {
     bodyHtml = _renderTheWheel(event);
   } else if (event.event_id === 'the_smith') {
@@ -3058,6 +3061,14 @@ function showMysteryEventModal(event, state) {
       </div>
     </div>`;
   overlay.classList.remove('hidden');
+}
+
+// Called when the player clicks Continue on the Mystery Box intro screen.
+function _showMysteryBoxWager() {
+  const player = gameState?.players?.find(p => p.is_current) || gameState?.players?.[0];
+  const bodyEl = document.querySelector('.mystery-fs-body');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = _renderMysteryBox(_pendingMysteryEvent, player);
 }
 
 function _renderMysteryBox(event, player) {
@@ -3235,6 +3246,11 @@ function _selectMysteryItem(idx, el) {
   if (el) el.classList.add('selected');
   const btn = document.getElementById('mystery-confirm-btn');
   if (btn) btn.disabled = false;
+  // Also refresh smith3 confirm button if we're in that mode
+  const smith3Btn = document.getElementById('smith3-confirm-btn');
+  if (smith3Btn) {
+    smith3Btn.disabled = !(_smithSelected3.size === 3 && _mysterySelectedIdx >= 0);
+  }
 }
 
 // Helper: get unified pack items
@@ -3315,17 +3331,7 @@ function _toggleSmithT3Item(el) {
   }
 }
 
-// Override _selectMysteryItem to also check smith3 readiness
-const _origSelectMysteryItem = _selectMysteryItem;
-function _selectMysteryItem(idx, el) {
-  _origSelectMysteryItem(idx, el);
-  // If we're in smith3 mode, re-check the confirm button
-  const btn = document.getElementById('smith3-confirm-btn');
-  if (btn) {
-    const ready = _smithSelected3.size === 3 && _mysterySelectedIdx >= 0;
-    btn.disabled = !ready;
-  }
-}
+
 
 async function _resolveSmithT3() {
   if (_smithSelected3.size < 3 || _mysterySelectedIdx < 0) return;
