@@ -1236,7 +1236,7 @@ class Game:
         # 15.5 MYSTERY — pause for interactive mystery event
         if actual_type == TileType.MYSTERY:
             from . import mystery as _mys
-            event = _mys.roll_mystery_event(new_pos)
+            event = _mys.roll_mystery_event(new_pos, player=self._current_player)
             log.append(f"Mystery Square: {event.name}!")
             self._pending_offer = {
                 "type": "mystery",
@@ -1688,6 +1688,8 @@ class Game:
                 "level": level,
                 "result": combat_result.name if combat_result else None,
             }
+            if pc.get("from_mystery"):
+                self._last_combat_info["from_mystery"] = True
 
         # Extract trait/curse gained from new log entries
         _extract_gains(self._last_combat_info, log, log_start, C)

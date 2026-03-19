@@ -75,6 +75,10 @@ class Player:
     # Gregory: Contagious Mutagen once-per-game tracker
     mutagen_used: bool = False
 
+    # Beggar encounter tracking (per-player, persists across turns)
+    _beggar_gifts: int = 0
+    _beggar_completed: bool = False
+
     # Items received from traits that need manual placement by the player
     pending_trait_items: list[Item] = field(default_factory=list)
 

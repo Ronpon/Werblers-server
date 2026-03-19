@@ -376,6 +376,10 @@ async function equipFromPack(packIndex) {
   });
   const data = await resp.json();
   if (data.error) {
+    if (data.error === 'multi_displace' && data.displaced_items) {
+      _showMultiDisplaceModal(packIndex, data.displaced_items, data.pack_slots_free);
+      return;
+    }
     if (data.error.includes('no free slot') && gameState) {
       const p = gameState.players.find(pl => pl.is_current);
       const item = p && p.pack[packIndex];
@@ -430,6 +434,11 @@ async function _occupiedSlotAction(action, extraParams) {
     body: JSON.stringify(body),
   });
   const data = await resp.json();
+  if (data.error === 'multi_displace' && data.displaced_items) {
+    // 2H weapon needs multiple displacements — switch to the multi-modal flow
+    _showMultiDisplaceModal(savedPackIndex, data.displaced_items, data.pack_slots_free);
+    return;
+  }
   if (data.error === 'pack_full' && data.pack) {
     // Show pack discard choice, then retry with discard_pack_index
     _showEquipPackDiscardChoice(data.pack, savedPackIndex);
@@ -463,6 +472,50 @@ function _showEquipPackDiscardChoice(packItems, origPackIndex) {
     await _occupiedSlotAction('to_pack', { discard_pack_index: dpi });
   };
   window._cancelEquipPackDiscard = () => overlay.remove();
+}
+
+// Multi-displace modal (for 2H weapons replacing multiple equipped items)
+async function _showMultiDisplaceModal(packIndex, displacedItems, packSlotsFree) {
+  const actions = [];
+  let slotsAvailable = packSlotsFree;
+
+  for (let i = 0; i < displacedItems.length; i++) {
+    const item = displacedItems[i];
+    const result = await new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+      const box = document.createElement('div');
+      box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 24px;max-width:400px;text-align:center';
+      const img = item.card_image ? `<img src="/images/${item.card_image}" style="width:100px;border-radius:6px;display:block;margin:8px auto">` : '';
+      const canPack = slotsAvailable > 0;
+      box.innerHTML = `
+        <div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:8px">Displaced Item (${i+1}/${displacedItems.length})</div>
+        <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:12px">${item.name} (+${item.strength_bonus} Str) must be removed to make room.</div>
+        ${img}
+        <div style="display:flex;gap:8px;justify-content:center;margin-top:16px">
+          ${canPack ? `<button class="btn-secondary" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve({action:'to_pack'})">Move to Pack</button>` : ''}
+          <button class="btn-danger" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve({action:'discard'})">Discard</button>
+          <button class="btn-secondary" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve(null)">Cancel</button>
+        </div>`;
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+      window._mdResolve = resolve;
+    });
+
+    if (result === null) return; // cancelled
+    actions.push(result);
+    if (result.action === 'to_pack') slotsAvailable--;
+  }
+
+  // Send all decisions to the server
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pack_index: packIndex, force: true, displaced_actions: actions }),
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) { gameState = data.state; applyState(data.state); renderPlayerSheetFull(data.state); }
 }
 
 // ================================================================ ABILITIES
@@ -1042,6 +1095,10 @@ function _attachDragDrop(container) {
         body: JSON.stringify({ pack_index: packIdx, to_pack: true }),
       });
       const data = await resp.json();
+      if (data.error === 'multi_displace' && data.displaced_items) {
+        _showMultiDisplaceModal(packIdx, data.displaced_items, data.pack_slots_free);
+        return;
+      }
       if (data.ok) { gameState = data.state; applyState(data.state); renderPlayerSheetFull(data.state); }
       else { console.warn(data.error || 'Cannot equip here'); }
     });
@@ -2100,11 +2157,13 @@ async function _pickPlayerForPackCurse(packIndex, targetPlayerId) {
 }
 
 let _lastFightWasSummon = false;
+let _lastFightFromMystery = false;
 async function doFight() {
   const resp = await fetch('/api/fight', { method: 'POST' });
   const data = await resp.json();
   if (data.state) gameState = data.state;
   _lastFightWasSummon = data.phase === 'summoned_done';
+  _lastFightFromMystery = !!(data.combat_info && data.combat_info.from_mystery);
   if (data.combat_info) {
     showBattleScene(data.combat_info, data.state);
   } else {
@@ -2260,6 +2319,19 @@ async function _placePendingTraitItems(forPlayerId) {
 }
 
 async function _finishBattleContinue() {
+  // If the fight came from a mystery event (e.g., Wheel prize), show the character
+  // farewell screen before returning to the overworld.
+  if (_lastFightFromMystery && _pendingMysteryEvent) {
+    _lastFightFromMystery = false;
+    const ev = _pendingMysteryEvent;
+    const quote = ev.event_id === 'the_wheel'
+      ? '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"'
+      : ev.event_id === 'mystery_box'
+      ? '"Heh! A monster from the box! The box never promised it would be safe!"'
+      : '"The outcome has been decided."';
+    await _showCharacterFarewell(ev, quote, () => {});
+  }
+  _lastFightFromMystery = false;
   document.getElementById('battle-overlay').classList.add('hidden');
   if (gameState) {
     viewingPlayerId = gameState.current_player_id;
@@ -2754,9 +2826,47 @@ function _occupiedSlotAction(action) {
   if (action === 'discard') {
     _finishPlacement({ placement: 'equip', equip_action: 'discard', equip_item_index: _occupiedSlotIdx });
   } else if (action === 'to_pack') {
-    _finishPlacement({ placement: 'equip', equip_action: 'swap', equip_item_index: _occupiedSlotIdx });
+    // Check if pack is full — if so, player must choose which pack item to discard
+    const p = gameState && gameState.players.find(pl => pl.is_current);
+    if (p && p.pack_slots_free <= 0) {
+      _showPlacementPackDiscardChoice(_occupiedSlotIdx);
+    } else {
+      _finishPlacement({ placement: 'equip', equip_action: 'swap', equip_item_index: _occupiedSlotIdx });
+    }
   }
   // 'cancel' → do nothing, placement stays open
+}
+
+function _showPlacementPackDiscardChoice(equipItemIdx) {
+  const p = gameState && gameState.players.find(pl => pl.is_current);
+  if (!p) return;
+  const packItems = [
+    ...(p.pack || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: i })),
+    ...(p.consumables || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: p.pack.length + i })),
+    ...(p.captured_monsters || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: p.pack.length + (p.consumables || []).length + i })),
+  ];
+  const overlay = document.createElement('div');
+  overlay.id = 'placement-pack-discard-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 24px;max-width:480px;text-align:center';
+  box.innerHTML = `<div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:12px">Pack Full</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:16px">Choose an item to discard from your pack to make room for the displaced item:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${packItems.map(p => {
+      const img = p.card_image ? `<img src="/images/${p.card_image}" style="width:70px;border-radius:4px;display:block">` : '';
+      return `<div class="rake-equip-btn" style="cursor:pointer" onclick="window._confirmPlacementPackDiscard(${p.idx})">
+        ${img}
+        <div style="font-size:10px;color:var(--text,#e0e0e0);margin-top:4px;max-width:80px;word-break:break-word">${p.name}</div>
+      </div>`;
+    }).join('')}</div>
+    <div style="margin-top:16px"><button class="btn-secondary" onclick="window._cancelPlacementPackDiscard()">Cancel</button></div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  window._confirmPlacementPackDiscard = (dpi) => {
+    overlay.remove();
+    _finishPlacement({ placement: 'equip', equip_action: 'swap', equip_item_index: equipItemIdx, pack_discard_index: dpi });
+  };
+  window._cancelPlacementPackDiscard = () => overlay.remove();
 }
 
 // ================================================================ BATTLE GEAR SECTION BUILDER
@@ -2916,9 +3026,9 @@ function showMysteryEventModal(event, state) {
   _pendingMysteryEvent = event;
   _mysterySelectedIdx = -1;
   const overlay = document.getElementById('battle-overlay');
-  const imgSrc = event.image ? `/images/${event.image}` : '';
+  // Use the event's own character image as the full-screen background
+  const bg = event.image ? `/images/${event.image}` : '';
   const player = state.players.find(p => p.is_current) || state.players[0];
-  const bg = state.tile_scene?.background ? `/images/${state.tile_scene.background}` : '';
 
   let bodyHtml = '';
   if (event.event_id === 'mystery_box') {
@@ -2935,9 +3045,8 @@ function showMysteryEventModal(event, state) {
     bodyHtml = _renderBeggar(event, player);
   }
 
-  // Wheel has its own image/desc in the body, so suppress the default ones
+  // Wheel renders its own image in the body; all others show description only
   const showDesc = event.event_id !== 'the_wheel';
-  const showImg = event.event_id !== 'the_wheel';
 
   overlay.innerHTML = `
     <div class="battle-bg" style="background-image:url('${bg}')"></div>
@@ -2945,7 +3054,6 @@ function showMysteryEventModal(event, state) {
       <div class="mystery-fs-inner">
         <h2 class="mystery-fs-title">${event.name}</h2>
         ${showDesc ? `<p class="mystery-fs-desc">${event.description || ''}</p>` : ''}
-        ${showImg && imgSrc ? `<img class="mystery-fs-img" src="${imgSrc}" alt="${event.name}" onerror="this.style.display='none'">` : ''}
         <div class="mystery-fs-body">${bodyHtml}</div>
       </div>
     </div>`;
@@ -2967,7 +3075,10 @@ function _renderMysteryBox(event, player) {
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
   }).join('');
-  return `<p class="mystery-info">Choose an item to wager:</p>
+  return `<div class="mystery-speech-bubble">
+            <p>"Wager an item and open the box — could be treasure, could be trouble!"</p>
+          </div>
+          <p class="mystery-info">Choose an item to wager:</p>
           <div class="mystery-item-grid">${itemBtns}</div>
           <div class="mystery-btn-row">
             <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Wager Item</button>
@@ -3010,21 +3121,35 @@ function _renderTheSmith(event, player) {
               <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
             </div>`;
   } else {
+    // Tier 3: trade 3 pack items AND enhance an equipped item
     const equipped = _getAllEquipped(player);
+    if (packItems.length < 3) {
+      return `<p class="mystery-info">You need at least 3 pack items to trade. You have ${packItems.length}.</p>
+              <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
+    }
     if (equipped.length === 0) {
       return `<p class="mystery-info">You have no equipped items to enhance.</p>
               <button class="btn-primary" onclick="_resolveMysterySkip()">Leave</button>`;
     }
-    const itemBtns = equipped.map((item, i) => {
+    _smithSelected3.clear();
+    const wagerBtns = packItems.map((item, i) => {
+      const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
+      return `<div class="mystery-selectable-item smith3-wager" data-idx="${i}" onclick="_toggleSmithT3Item(this)">
+        ${img}<div class="mystery-item-label">${item.name}</div>
+      </div>`;
+    }).join('');
+    const enhanceBtns = equipped.map((item, i) => {
       const img = item.card_image ? `<img class="mystery-item-thumb" src="/images/${item.card_image}" onerror="this.style.display='none'">` : '';
       return `<div class="mystery-selectable-item" data-idx="${i}" onclick="_selectMysteryItem(${i}, this)">
         ${img}<div class="mystery-item-label">${item.name} (+${item.strength_bonus})</div>
       </div>`;
     }).join('');
-    return `<p class="mystery-info">Choose an equipped item to receive +3 Str:</p>
-            <div class="mystery-item-grid">${itemBtns}</div>
+    return `<p class="mystery-info">Select 3 items from your pack to trade:</p>
+            <div class="mystery-item-grid" id="smith3-wager-grid">${wagerBtns}</div>
+            <p class="mystery-info" style="margin-top:12px">Choose an equipped item to receive +3 Str:</p>
+            <div class="mystery-item-grid" id="smith3-enhance-grid">${enhanceBtns}</div>
             <div class="mystery-btn-row">
-              <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveSmithEnhance(_mysterySelectedIdx)" disabled>Enhance</button>
+              <button class="btn-primary" id="smith3-confirm-btn" onclick="_resolveSmithT3()" disabled>Trade &amp; Enhance</button>
               <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
             </div>`;
   }
@@ -3045,37 +3170,62 @@ function _renderThief(event) {
 }
 
 function _renderBeggar(event, player) {
-  // Check if this player already completed the fairy king reward
+  // When beggar_completed=true the beggar is filtered from the event pool, so this is a safety fallback only.
   const beggarDone = player.beggar_completed || false;
   if (beggarDone) {
-    return `<p class="mystery-info">The Fairy King smiles warmly at you.</p>
-            <p class="mystery-info" style="font-style:italic">"I have nothing more for you; good luck."</p>
+    return `<div class="mystery-speech-bubble"><p>"I have nothing more for you. Good luck."</p></div>
             <div class="mystery-btn-row">
               <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>
             </div>`;
   }
   const packItems = _getUnifiedPack(player);
   const equipped = _getAllEquipped(player);
-  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
-                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
-  if (allItems.length === 0) {
-    return `<p class="mystery-info">You have nothing to give — the beggar sighs and shuffles away.</p>
+  if (packItems.length + equipped.length === 0) {
+    return `<div class="mystery-speech-bubble"><p>"Do you have anything to spare for an old man?"</p></div>
+            <p class="mystery-info">You have nothing to give.</p>
             <div class="mystery-btn-row">
               <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>
             </div>`;
   }
+  return `<div class="mystery-speech-bubble"><p>"Do you have anything to spare for an old man?"</p></div>
+          <div class="mystery-btn-row">
+            <button class="btn-primary" onclick="_beggarShowItemPicker()">Yes</button>
+            <button class="btn-secondary" onclick="_beggarSayNo()">No</button>
+          </div>`;
+}
+
+function _beggarSayNo() {
+  const bodyEl = document.querySelector('.mystery-fs-body');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = `
+    <div class="mystery-speech-bubble"><p>"Thank you anyway..."</p></div>
+    <div class="mystery-btn-row">
+      <button class="btn-primary" onclick="_resolveMysterySkip()">Continue</button>
+    </div>`;
+}
+
+function _beggarShowItemPicker() {
+  const player = gameState?.players?.find(p => p.is_current) || gameState?.players?.[0];
+  if (!player) return;
+  const packItems = _getUnifiedPack(player);
+  const equipped = _getAllEquipped(player);
+  const allItems = [...packItems.map((item, i) => ({name: item.name, img: item.card_image, idx: i})),
+                    ...equipped.map((item, i) => ({name: item.name, img: item.card_image, idx: packItems.length + i}))];
+  _mysterySelectedIdx = -1;
   const itemBtns = allItems.map(item => {
     const img = item.img ? `<img class="mystery-item-thumb" src="/images/${item.img}" onerror="this.style.display='none'">` : '';
     return `<div class="mystery-selectable-item" data-idx="${item.idx}" onclick="_selectMysteryItem(${item.idx}, this)">
       ${img}<div class="mystery-item-label">${item.name}</div>
     </div>`;
   }).join('');
-  return `<p class="mystery-info">Choose an item to give to the beggar:</p>
-          <div class="mystery-item-grid">${itemBtns}</div>
-          <div class="mystery-btn-row">
-            <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveBeggarGive(_mysterySelectedIdx)" disabled>Give Item</button>
-            <button class="btn-secondary" onclick="_resolveMysterySkip()">Decline</button>
-          </div>`;
+  const bodyEl = document.querySelector('.mystery-fs-body');
+  if (!bodyEl) return;
+  bodyEl.innerHTML = `
+    <p class="mystery-info">Choose an item to give:</p>
+    <div class="mystery-item-grid">${itemBtns}</div>
+    <div class="mystery-btn-row">
+      <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveBeggarGive(_mysterySelectedIdx)" disabled>Give Item</button>
+    </div>`;
 }
 
 // Shared item selection for events that need select-then-confirm
@@ -3104,6 +3254,7 @@ function _getAllEquipped(player) {
 
 // Smith: toggle item selection (exactly 3)
 let _smithSelected = new Set();
+let _smithSelected3 = new Set();
 function _toggleSmithItem(el) {
   const idx = parseInt(el.dataset.idx);
   if (_smithSelected.has(idx)) {
@@ -3143,6 +3294,48 @@ async function _resolveSmithEnhance(equipIndex) {
   await _postResolveMystery({action: 'smith', smith_equip_index: equipIndex, smith_indices: []});
 }
 
+// Smith Tier 3: toggle wager item
+function _toggleSmithT3Item(el) {
+  const idx = parseInt(el.dataset.idx);
+  if (_smithSelected3.has(idx)) {
+    _smithSelected3.delete(idx);
+    el.classList.remove('selected');
+  } else {
+    if (_smithSelected3.size >= 3) return;
+    _smithSelected3.add(idx);
+    el.classList.add('selected');
+  }
+  const btn = document.getElementById('smith3-confirm-btn');
+  if (btn) {
+    const ready = _smithSelected3.size === 3 && _mysterySelectedIdx >= 0;
+    btn.disabled = !ready;
+    btn.textContent = _smithSelected3.size < 3
+      ? `Trade & Enhance (select ${3 - _smithSelected3.size} more)`
+      : 'Trade & Enhance';
+  }
+}
+
+// Override _selectMysteryItem to also check smith3 readiness
+const _origSelectMysteryItem = _selectMysteryItem;
+function _selectMysteryItem(idx, el) {
+  _origSelectMysteryItem(idx, el);
+  // If we're in smith3 mode, re-check the confirm button
+  const btn = document.getElementById('smith3-confirm-btn');
+  if (btn) {
+    const ready = _smithSelected3.size === 3 && _mysterySelectedIdx >= 0;
+    btn.disabled = !ready;
+  }
+}
+
+async function _resolveSmithT3() {
+  if (_smithSelected3.size < 3 || _mysterySelectedIdx < 0) return;
+  const indices = Array.from(_smithSelected3).sort((a, b) => b - a);
+  const enhanceIdx = _mysterySelectedIdx;
+  _smithSelected3.clear();
+  _mysterySelectedIdx = -1;
+  await _postResolveMystery({action: 'smith', smith_indices: indices, smith_equip_index: enhanceIdx});
+}
+
 async function _resolveMysteryAuto(eventType) {
   await _postResolveMystery({action: 'accept'});
 }
@@ -3173,16 +3366,14 @@ async function _postResolveMystery(body) {
     const data = await resp.json();
     if (data.state) { gameState = data.state; applyState(data.state); }
 
-    // For the Wheel: show farewell screen before proceeding to result
     const isWheel = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'the_wheel';
-    if (isWheel && body.action === 'spin') {
-      await _showWheelFarewell(data);
-    }
+    const isBandits = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'bandits';
+    const isMysteryBox = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'mystery_box';
 
     if (data.phase === 'combat') {
-      // Show outcome screen ("A monster appears!"), then proceed to fight
+      // Show prize announcement ("You win… a monster!"), then proceed to fight.
+      // Keep _pendingMysteryEvent alive so the farewell screen works after combat.
       await _showMysteryOutcome(data, () => {
-        _pendingMysteryEvent = null;
         playMusic('Battle Music.wav');
         showPreFightScene(data.combat_info, data.state);
       });
@@ -3198,10 +3389,39 @@ async function _postResolveMystery(body) {
     } else if (data.phase === 'fairy_king_reveal') {
       _showFairyKingReveal(data);
     } else {
-      // done — show outcome screen (stolen, nothing, trait, smith_enhance, etc.)
-      // Skip/decline has no outcome to show
+      // done — show outcome screen then optional farewell
       if (data.prize_type === 'skip') {
         _closeMysteryResult();
+      } else if (isWheel) {
+        // Wheel: prize announcement, then goblin farewell
+        await _showMysteryOutcome(data, async () => {
+          await _showCharacterFarewell(
+            _pendingMysteryEvent,
+            '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"',
+            () => _closeMysteryResult()
+          );
+        });
+      } else if (isMysteryBox) {
+        // Mystery Box: prize announcement, then character farewell
+        await _showMysteryOutcome(data, async () => {
+          const farewell = data.prize_type === 'nothing'
+            ? '"Nothing in there but dust! Come back when you have something worth wagering!"'
+            : '"Well, well\u2026 I hope that was worth the wager! Come back any time!"';
+          await _showCharacterFarewell(
+            _pendingMysteryEvent,
+            farewell,
+            () => _closeMysteryResult()
+          );
+        });
+      } else if (isBandits && data.prize_type === 'stolen') {
+        // Bandits: stolen card screen, then bandit farewell
+        await _showMysteryOutcome(data, async () => {
+          await _showCharacterFarewell(
+            _pendingMysteryEvent,
+            '"Thank you for your\u2026 heh\u2026 generosity."',
+            () => _closeMysteryResult()
+          );
+        });
       } else {
         await _showMysteryOutcome(data, () => _closeMysteryResult());
       }
@@ -3211,9 +3431,33 @@ async function _postResolveMystery(body) {
   }
 }
 
-async function _showWheelFarewell(data) {
-  // Wheel farewell is now handled by _showMysteryOutcome with wheel-specific quote
-  // This is a no-op — the outcome screen handles everything after spinning
+// Show a character farewell/quote screen using the event's own image as background.
+async function _showCharacterFarewell(event, quoteText, onContinue) {
+  const tier = event?.tier || 1;
+  const imgName = event?.image_name || event?.name || '';
+  const bg = imgName ? `/images/Events/${imgName} Tier ${tier}.png` : '';
+  const title = event?.name || '';
+  const overlay = document.getElementById('battle-overlay');
+
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image:url('${bg}')"></div>
+    <div class="battle-content mystery-fullscreen">
+      <div class="mystery-fs-inner">
+        <h2 class="mystery-fs-title">${title}</h2>
+        <div class="mystery-speech-bubble"><p>${quoteText}</p></div>
+        <div class="mystery-btn-row">
+          <button class="btn-primary" id="mystery-farewell-btn">Continue</button>
+        </div>
+      </div>
+    </div>`;
+  overlay.classList.remove('hidden');
+
+  return new Promise(resolve => {
+    document.getElementById('mystery-farewell-btn').onclick = () => {
+      if (typeof onContinue === 'function') onContinue();
+      resolve();
+    };
+  });
 }
 
 // ------ Outcome screen shown after resolving any mystery event ------
@@ -3232,13 +3476,18 @@ function _getMysteryOutcomeContent(data) {
     case 'mystery_box':
       title = 'Mystery Box';
       if (prizeType === 'nothing') {
-        outcomeText = 'The box was empty! Better luck next time.';
+        outcomeText = 'You win\u2026 nothing! The box is empty.';
       } else if (prizeType === 'trait') {
-        outcomeText = `You gained a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+        const monsterNameBox = data.monster_name || '';
+        outcomeText = monsterNameBox
+          ? `You win\u2026 a dead monster! <strong>${monsterNameBox}</strong>'s trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
+          : `You win\u2026 a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
       } else if (prizeType === 'item') {
-        outcomeText = `You received: <strong>${itemName || 'an item'}</strong>!`;
-      } else if (prizeType === 'monster' || prizeType === 'monster_up') {
-        outcomeText = `A monster leaps from the box!`;
+        outcomeText = `You win\u2026 <strong>${itemName || 'an item'}</strong>!`;
+      } else if (prizeType === 'monster_up') {
+        outcomeText = 'You win\u2026 a strong monster! It leaps from the box!';
+      } else if (prizeType === 'monster') {
+        outcomeText = 'You win\u2026 a monster! It leaps from the box!';
       } else {
         outcomeText = label || 'The mystery has been resolved.';
       }
@@ -3246,17 +3495,22 @@ function _getMysteryOutcomeContent(data) {
     case 'the_wheel':
       title = 'The Wheel';
       if (prizeType === 'nothing') {
-        outcomeText = 'The wheel lands on nothing! No prize this time.';
+        outcomeText = 'You win… nothing!';
       } else if (prizeType === 'trait') {
-        outcomeText = `You gained a trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
+        const monsterName = data.monster_name || '';
+        outcomeText = monsterName
+          ? `You win… a dead monster! <strong>${monsterName}</strong>'s trait is now yours: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`
+          : `You win… a mysterious trait: <strong>${data.trait_name || 'a mysterious trait'}</strong>!`;
       } else if (prizeType === 'item') {
-        outcomeText = `You won: <strong>${itemName || 'an item'}</strong>!`;
-      } else if (prizeType === 'monster' || prizeType === 'monster_up') {
-        outcomeText = 'A monster appears as your "prize"!';
+        outcomeText = `You win… <strong>${itemName || 'an item'}</strong>!`;
+      } else if (prizeType === 'monster_up') {
+        outcomeText = `You win… a strong monster!`;
+      } else if (prizeType === 'monster') {
+        outcomeText = `You win… a monster!`;
       } else {
         outcomeText = label || 'The wheel has spoken.';
       }
-      quoteText = '"Congratulations, or sorry that happened! Don\'t forget to spay and neuter your minions!"';
+      // No quoteText here — goblin farewell is shown in a separate screen after the outcome
       break;
     case 'the_smith':
       title = 'The Smith';
@@ -3279,7 +3533,7 @@ function _getMysteryOutcomeContent(data) {
       } else {
         outcomeText = label || 'The bandits vanish into the shadows.';
       }
-      quoteText = '"Thank you for your\u2026 heh\u2026 generosity."';
+      // No quoteText here — bandit farewell is shown in a separate screen
       break;
     case 'thief':
       title = 'Thief';
@@ -3310,8 +3564,10 @@ async function _showMysteryOutcome(data, onContinue) {
   const eventId = data.event_id || (_pendingMysteryEvent && _pendingMysteryEvent.event_id) || '';
   const tier = _pendingMysteryEvent?.tier || 1;
   const imgName = _pendingMysteryEvent?.image_name || _pendingMysteryEvent?.name || title;
-  const imgSrc = `/images/Events/${imgName} Tier ${tier}.png`;
-  const bg = gameState?.tile_scene?.background ? `/images/${gameState.tile_scene.background}` : '';
+  // Use event character image as full-screen background
+  const bg = `/images/Events/${imgName} Tier ${tier}.png`;
+  // Show a specific card (stolen item, monster card) if provided
+  const featuredCard = data.card_image || data.combat_info?.card_image || null;
   const overlay = document.getElementById('battle-overlay');
 
   overlay.innerHTML = `
@@ -3319,7 +3575,7 @@ async function _showMysteryOutcome(data, onContinue) {
     <div class="battle-content mystery-fullscreen">
       <div class="mystery-fs-inner">
         <h2 class="mystery-fs-title">${title}</h2>
-        <img class="mystery-fs-img" src="${imgSrc}" alt="${title}" onerror="this.style.display='none'">
+        ${featuredCard ? `<img class="mystery-fs-img" src="/images/${featuredCard}" alt="${title}" onerror="this.style.display='none'">` : ''}
         ${outcomeText ? `<p class="mystery-outcome-text">${outcomeText}</p>` : ''}
         ${quoteText ? `<div class="mystery-speech-bubble"><p>${quoteText}</p></div>` : ''}
         <div class="mystery-btn-row">
@@ -3344,33 +3600,34 @@ function _showBeggarThankYou(data) {
 function _showFairyKingReveal(data) {
   const overlay = document.getElementById('battle-overlay');
   const tier = _pendingMysteryEvent?.tier || 1;
-  const bg = gameState?.tile_scene?.background ? `/images/${gameState.tile_scene.background}` : '';
   const beggarImg = `/images/Events/Beggar Tier ${tier}.png`;
   const fkImg = `/images/Events/Fairy King Tier ${tier}.png`;
+  // Start with the beggar image, then transform — no "thank you" message on 3rd gift
   overlay.innerHTML = `
-    <div class="battle-bg" style="background-image:url('${bg}')"></div>
+    <div class="battle-bg" style="background-image:url('${beggarImg}')"></div>
     <div class="battle-content mystery-fullscreen">
       <div class="mystery-fs-inner" id="fk-reveal-inner">
-        <h2 class="mystery-fs-title">Beggar</h2>
-        <img class="mystery-fs-img" id="fk-reveal-img" src="${beggarImg}" alt="Beggar" onerror="this.style.display='none'">
-        <p class="mystery-fs-desc" id="fk-reveal-text" style="font-style:italic">"Thank you for your generosity."</p>
+        <h2 class="mystery-fs-title">The Beggar</h2>
       </div>
     </div>`;
   overlay.classList.remove('hidden');
+  // Transform to Fairy King after a brief pause
   setTimeout(() => {
+    const bgEl = overlay.querySelector('.battle-bg');
     const titleEl = document.querySelector('#fk-reveal-inner .mystery-fs-title');
-    const imgEl = document.getElementById('fk-reveal-img');
-    const textEl = document.getElementById('fk-reveal-text');
+    if (bgEl) { bgEl.classList.add('fk-reveal-flash'); bgEl.style.backgroundImage = `url('${fkImg}')`; }
     if (titleEl) titleEl.textContent = 'The Fairy King';
-    if (imgEl) { imgEl.classList.add('fk-reveal-flash'); imgEl.src = fkImg; }
-    if (textEl) textEl.innerHTML = '"You shall be rewarded for your kindness."';
+    const inner = document.getElementById('fk-reveal-inner');
+    if (inner) {
+      inner.insertAdjacentHTML('beforeend', `<p class="mystery-fs-desc" style="font-style:italic">"You are very kind. Your generosity shall be rewarded."</p>`);
+    }
     // After another delay, show item choices
     setTimeout(() => {
       const items = data.reward_items || [];
-      const inner = document.getElementById('fk-reveal-inner');
-      if (!inner) return;
+      const inner2 = document.getElementById('fk-reveal-inner');
+      if (!inner2) return;
       if (items.length === 0) {
-        inner.innerHTML += `<div class="mystery-btn-row"><button class="btn-primary" onclick="_closeMysteryResult()">Continue</button></div>`;
+        inner2.insertAdjacentHTML('beforeend', `<div class="mystery-btn-row"><button class="btn-primary" onclick="_closeMysteryResult()">Continue</button></div>`);
         return;
       }
       const itemsHtml = items.map((item, i) => {
@@ -3379,13 +3636,12 @@ function _showFairyKingReveal(data) {
           ${img}<div class="mystery-item-label">${item.name} (+${item.strength_bonus})</div>
         </div>`;
       }).join('');
-      const choiceHtml = `
+      inner2.insertAdjacentHTML('beforeend', `
         <p class="mystery-info" style="margin-top:16px">Choose your reward:</p>
         <div class="mystery-item-grid">${itemsHtml}</div>
         <div class="mystery-btn-row">
           <button class="btn-primary" id="fk-reward-btn" onclick="_resolveFairyKingReward()" disabled>Take Item</button>
-        </div>`;
-      inner.insertAdjacentHTML('beforeend', choiceHtml);
+        </div>`);
     }, 2500);
   }, 2000);
 }
@@ -3411,6 +3667,25 @@ async function _resolveFairyKingReward() {
     const data = await resp.json();
     if (data.state) { gameState = data.state; applyState(data.state); }
     _fkRewardIdx = -1;
+    // Show "Goodbye, and good luck." farewell before proceeding
+    const tier = _pendingMysteryEvent?.tier || 1;
+    const fkImg = `/images/Events/Fairy King Tier ${tier}.png`;
+    const overlay = document.getElementById('battle-overlay');
+    overlay.innerHTML = `
+      <div class="battle-bg" style="background-image:url('${fkImg}')"></div>
+      <div class="battle-content mystery-fullscreen">
+        <div class="mystery-fs-inner">
+          <h2 class="mystery-fs-title">The Fairy King</h2>
+          <div class="mystery-speech-bubble"><p>"Goodbye, and good luck."</p></div>
+          <div class="mystery-btn-row">
+            <button class="btn-primary" id="fk-farewell-btn">Continue</button>
+          </div>
+        </div>
+      </div>`;
+    overlay.classList.remove('hidden');
+    await new Promise(resolve => {
+      document.getElementById('fk-farewell-btn').onclick = () => resolve();
+    });
     _pendingMysteryEvent = null;
     if (data.phase === 'offer_chest') {
       _pendingOfferData = data.offer;
@@ -3421,7 +3696,7 @@ async function _resolveFairyKingReward() {
   } catch(e) { console.error('fairy king reward error:', e); }
 }
 
-function _closeMysteryResult() {
+async function _closeMysteryResult() {
   document.getElementById('battle-overlay').classList.add('hidden');
   _pendingMysteryEvent = null;
   if (gameState) {
@@ -3430,6 +3705,7 @@ function _closeMysteryResult() {
   }
   _resumeTierMusic(gameState);
   loadAndRenderAbilities();
+  await _placePendingTraitItems();
   _checkPendingMinions(gameState);
 }
 

@@ -66,16 +66,25 @@ def _get_tier(position: int) -> int:
 # Roll a random event
 # ---------------------------------------------------------------------------
 
-def roll_mystery_event(position: int, rng: random.Random | None = None) -> MysteryEvent:
+def roll_mystery_event(position: int, rng: random.Random | None = None, player=None) -> MysteryEvent:
     """Select a random mystery event weighted by rarity."""
     if rng is None:
         rng = random.Random()
 
     tier = _get_tier(position)
-    ids = [e[0] for e in _EVENT_TABLE]
-    names = [e[1] for e in _EVENT_TABLE]
-    rarities = [e[2] for e in _EVENT_TABLE]
-    image_names = [e[3] for e in _EVENT_TABLE]
+
+    # Build filtered event list — skip beggar if already completed
+    # Also permanently exclude fairy_king — it is NEVER a standalone random event;
+    # it only appears via the beggar's 3rd-gift transformation.
+    _NEVER_RANDOM = {"fairy_king"}
+    events = [e for e in _EVENT_TABLE if e[0] not in _NEVER_RANDOM]
+    if player and getattr(player, "_beggar_completed", False):
+        events = [e for e in events if e[0] != "beggar"]
+
+    ids = [e[0] for e in events]
+    names = [e[1] for e in events]
+    rarities = [e[2] for e in events]
+    image_names = [e[3] for e in events]
     weights = [_RARITY_WEIGHTS[r] for r in rarities]
 
     idx = rng.choices(range(len(ids)), weights=weights, k=1)[0]
@@ -248,7 +257,22 @@ def resolve_the_smith(
             log.append("The Smith: item deck empty — no reward.")
             return {"prize_type": "nothing", "label": "Deck empty"}
     else:
-        # Tier 3: add +3 Str to a chosen equipped item
+        # Tier 3: trade 3 pack items AND give +3 Str to a chosen equipped item
+        if len(wager_indices) < 3:
+            log.append("The Smith: need 3 items to trade.")
+            return {"prize_type": "error"}
+        np = len(player.pack)
+        nc = len(player.consumables)
+        nm = len(player.captured_monsters)
+        pack_total = np + nc + nm
+        names = []
+        for idx in sorted(wager_indices, reverse=True):
+            if idx < pack_total:
+                name = player.evict_pack_slot(idx)
+                if name:
+                    names.append(name)
+        if names:
+            log.append(f"The Smith: traded {', '.join(names)}.")
         all_equipped = player.helmets + player.chest_armor + player.leg_armor + player.weapons
         if not all_equipped:
             log.append("The Smith: no equipped items to enhance.")
@@ -276,7 +300,7 @@ def resolve_bandits(
     victim = rng.choice(all_equipped)
     player.unequip(victim)
     log.append(f"Bandits: stole your {victim.name}!")
-    return {"prize_type": "stolen", "item_name": victim.name, "label": f"Lost {victim.name}"}
+    return {"prize_type": "stolen", "item": victim, "item_name": victim.name, "label": f"Lost {victim.name}"}
 
 
 def resolve_thief(
@@ -310,8 +334,8 @@ def resolve_beggar(
     After the 3rd gift, the beggar transforms into the Fairy King who offers 3 T3 items.
     """
     if getattr(player, "_beggar_completed", False):
-        log.append("The Fairy King has nothing more for you — good luck!")
-        return {"prize_type": "skip", "label": "Fairy King: nothing more"}
+        log.append("The beggar has moved on — there is nothing more here.")
+        return {"prize_type": "skip", "label": "Beggar has moved on"}
 
     gifts_so_far = getattr(player, "_beggar_gifts", 0)
     np = len(player.pack)
@@ -339,11 +363,11 @@ def resolve_beggar(
         log.append(f"Beggar: you gave {item.name} (equipped).")
 
     gifts_so_far += 1
-    player._beggar_gifts = gifts_so_far  # type: ignore[attr-defined]
+    player._beggar_gifts = gifts_so_far
 
     if gifts_so_far >= 3:
         # 3rd gift: Fairy King reveal — draw 3 T3 items for player to choose from
-        player._beggar_completed = True  # type: ignore[attr-defined]
+        player._beggar_completed = True
         reward_items = []
         for _ in range(3):
             item = item_decks[3].draw()
@@ -391,7 +415,7 @@ def _materialise_prize(
         monster = monster_decks[m_tier].draw()
         if monster:
             log.append(f"  Prize: {monster.name} (Tier {m_tier} monster) — prepare to fight!")
-            return {"prize_type": "monster", "monster": monster, "tier": m_tier, "label": prize.label}
+            return {"prize_type": prize.prize_type, "monster": monster, "tier": m_tier, "label": prize.label}
         else:
             log.append("  Prize: monster deck empty — lucky escape!")
             return {"prize_type": "nothing", "label": "Monster deck empty"}
@@ -403,7 +427,7 @@ def _materialise_prize(
             deck = monster_decks.get(t)
             if deck:
                 all_monsters.extend(deck.peek_all())
-        monsters_with_traits = [m for m in all_monsters if m.trait_name]
+        monsters_with_traits = [m for m in all_monsters if m.trait_name and m.trait_name != "She's Melting!"]
         if monsters_with_traits:
             chosen = rng.choice(monsters_with_traits)
             trait = C.trait_for_monster(chosen)
@@ -414,7 +438,7 @@ def _materialise_prize(
                 player.pending_trait_items.extend(trait_items)
                 player.pending_trait_minions.extend(trait_minions)
                 _fx.refresh_tokens(player)
-                return {"prize_type": "trait", "trait": trait, "label": f"Trait: {trait.name}"}
+                return {"prize_type": "trait", "trait": trait, "monster_name": chosen.name, "label": f"Trait: {trait.name}"}
         # Fallback: draw from trait deck
         trait = trait_deck.draw()
         if trait:

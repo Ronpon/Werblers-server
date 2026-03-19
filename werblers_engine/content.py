@@ -133,13 +133,12 @@ ITEM_POOL_L1: list[Item] = [
 ]
 
 ITEM_POOL_L2: list[Item] = [
-    Item("Iron Helm", EquipSlot.HELMET, strength_bonus=2),
     # Chest armour (Tier 2)
     Item("Iron Armour", EquipSlot.CHEST, strength_bonus=4),
     Item("3D-Printed Armour", EquipSlot.CHEST, strength_bonus=5),
     Item("Steel Plate Armour", EquipSlot.CHEST, strength_bonus=6),
     Item("Chain Mail", EquipSlot.CHEST, strength_bonus=6),
-    Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=8),
+    Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=6),
     Item("Wizard's Robes", EquipSlot.CHEST, strength_bonus=1, effect_id="wizards_robes"),
     # Leg armour (Tier 2)
     Item("Iron Greaves", EquipSlot.LEGS, strength_bonus=4),
@@ -274,13 +273,13 @@ TRAIT_DESCRIPTIONS: dict[str, str] = {
     # Monster traits — conditional
     "Calloused": "+3 Str when not wearing any headgear.",
     "BDE": "+5 Str. If you have no foot armour.",
-    "Tough Skin": "+1 Str per item in your pack.",
+    "Tough Skin": "When you have no Chest armour, gain +10 Str.",
     "Bark Worse Than its Bite": "+3 Str for each empty equipment slot.",
     "Strengthened by Taint": "+2 Str for each curse you have.",
     # Monster traits — on-gain items / special
     "Ball and Chain": "Gain the Ball and Chain item (Weapon, +5 Str).",
     "You Got a Birdie!": "Take a Power Driver Equip Card (2H, +10 Str).",
-    "Kapwing!": "Gain a Bulletproof Vest (+8 chest armour).",
+    "Kapwing!": "Gain a Bulletproof Vest (+6 chest armour).",
     "I'm a Grown-up Now!": "Gain a Ted Bearson Minion Card (+3 Str).",
     "Alpha": "Gain a Pet Velociraptor Minion Card (+5 Str).",
     "She's Melting!": "Gain a Vial of Liquid Witch consumable (+10 Str in one battle).",

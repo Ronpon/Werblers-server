@@ -121,11 +121,11 @@ def test_the_smith_trade_with_equipped():
 
 
 def test_the_smith_enhance():
-    """The Smith (tier 3): enhance an equipped item."""
-    p = _make_player(items=0, equip=1)
+    """The Smith (tier 3): trade 3 pack items and enhance an equipped item."""
+    p = _make_player(items=3, equip=1)
     item_decks, _, _ = _make_decks()
     log = []
-    result = mys.resolve_the_smith(p, 3, item_decks, [], 0, log)
+    result = mys.resolve_the_smith(p, 3, item_decks, [0, 1, 2], 0, log)
     _assert_valid_result(result, "the_smith_enhance")
 
 

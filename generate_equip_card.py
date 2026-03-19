@@ -198,7 +198,7 @@ CHEST_CARDS: dict[str, dict] = {
     "bulletproof_vest": {
         "name": "Bulletproof Vest",
         "type": "Chest",
-        "strength": "+8",
+        "strength": "+6",
         "portrait": "Bulletproof Vest.png",
         "output": "Bulletproof Vest Card.png",
         "blurb": "Surprisingly useful, even in fantasy.",

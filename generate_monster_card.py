@@ -667,7 +667,7 @@ MONSTERS: dict[str, dict] = {
         "description": "He needs a hug.",
         "trait": {
             "name": "Tough Skin",
-            "text": "If you are wearing no Chest Armour, you have +10 Str.",
+            "text": "When you have no Chest Armour, gain +10 Str.",
         },
         "curse": {
             "name": "Flooded Base!",

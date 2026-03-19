@@ -125,23 +125,20 @@ class TestTraitStrengthEffects:
         fx.refresh_tokens(p)
         assert p.total_strength == 5 + 2  # no BDE bonus, just greaves
 
-    def test_tough_skin_empty_pack(self):
-        """Tough Skin: +0 Str when pack is empty."""
+    def test_tough_skin_no_chest(self):
+        """Tough Skin: +10 Str when no chest armour equipped."""
         p = _make_player(base_strength=5)
         p.traits.append(Trait("Tough Skin", effect_id="tough_skin"))
         fx.refresh_tokens(p)
-        assert p.total_strength == 5
+        assert p.total_strength == 5 + 10
 
-    def test_tough_skin_counts_pack_items(self):
-        """Tough Skin: +1 Str per item in pack (equip, consumable, captured monster)."""
-        from werblers_engine.types import Consumable
+    def test_tough_skin_with_chest(self):
+        """Tough Skin: +0 Str when chest armour is equipped."""
         p = _make_player(base_strength=5)
         p.traits.append(Trait("Tough Skin", effect_id="tough_skin"))
-        p.pack.append(Item("Helmet", EquipSlot.HELMET, strength_bonus=0))
-        p.consumables.append(Consumable("Potion", effect_id="potion"))
-        p.captured_monsters.append(Monster("Goblin", strength=1, effect_id="goblin"))
+        p.chest_armor.append(Item("Vest", EquipSlot.CHEST, strength_bonus=3))
         fx.refresh_tokens(p)
-        assert p.total_strength == 5 + 3  # 1 pack + 1 consumable + 1 captured
+        assert p.total_strength == 5 + 3  # only the vest bonus, no trait bonus
 
     def test_bark_worse_than_bite_empty_slots(self):
         """Bark Worse Than its Bite: +3 per empty equip slot."""

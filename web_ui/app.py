@@ -303,8 +303,8 @@ def api_resolve_mystery():
         log.append(f"Unknown mystery event: {event_id}")
         result = {"prize_type": "nothing", "label": "Unknown event"}
 
-    # If the prize is a monster, set up pending combat instead of finishing turn
-    if result.get("prize_type") == "monster":
+    # If the prize is a monster (or stronger monster), set up pending combat
+    if result.get("prize_type") in ("monster", "monster_up"):
         monster = result["monster"]
         m_tier = result.get("tier", tier)
         _game._pending_offer = None
@@ -403,6 +403,11 @@ def api_resolve_mystery():
             "state": _build_state(),
         })
 
+    # Error results — Don't finish the turn; let the player retry
+    if result.get("prize_type") == "error":
+        _last_log = log
+        return jsonify({"error": "Invalid selection — please try again.", "state": _build_state()}), 400
+
     # Otherwise (nothing, skip, trait, smith_enhance, gift_accepted, stolen)
     # — finish the turn
     _game._pending_offer = None
@@ -422,10 +427,15 @@ def api_resolve_mystery():
     # Include item/trait/stolen info depending on prize_type
     if result.get("item_name"):
         outcome["item_name"] = result["item_name"]
+    if result.get("item"):
+        outcome["card_image"] = _item_card_image(result["item"])
     if result.get("items"):
         outcome["stolen_items"] = result["items"]
     if result.get("trait") and hasattr(result["trait"], "name"):
         outcome["trait_name"] = result["trait"].name
+    if result.get("monster_name"):
+        outcome["monster_name"] = result["monster_name"]
+        outcome["card_image"] = _monster_card_image(result["monster_name"])
     return jsonify(outcome)
 
 
@@ -438,7 +448,7 @@ def _item_to_dict_from_obj(item) -> dict:
         "effect_id": item.effect_id,
         "hands": item.hands,
         "is_consumable": item.is_consumable,
-        "card_image": _item_card_image(item.name, item.slot.value),
+        "card_image": _item_card_image(item),
     }
 
 
@@ -523,6 +533,7 @@ def api_equip_from_pack():
     Optional flags:
       ``force``   -- discard the displaced item when no free slot available.
       ``to_pack`` -- move the displaced item to the pack instead of discarding.
+      ``displaced_actions`` -- list of dicts with {action: 'discard'|'to_pack', discard_pack_index: int} for each displaced item.
     """
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
@@ -531,11 +542,72 @@ def api_equip_from_pack():
     force   = bool(data.get("force",   False))
     to_pack = bool(data.get("to_pack", False))
     discard_pack_index = int(data.get("discard_pack_index", -1))
+    displaced_actions = data.get("displaced_actions", None)
     player = _game.current_player
     if pack_index < 0 or pack_index >= len(player.pack):
         return jsonify({"error": "Invalid pack index"}), 400
     item = player.pack[pack_index]
     if not player.can_equip(item):
+        # --- Weapon slot: compute how many weapons must be displaced ---
+        if item.slot.value == "weapon":
+            hands_used = sum(w.hands for w in player.weapons)
+            hands_free = player.weapon_hands - hands_used
+            hands_to_free = item.hands - hands_free
+
+            items_to_displace = []
+            freed = 0
+            for w in list(player.weapons):
+                if freed >= hands_to_free:
+                    break
+                items_to_displace.append(w)
+                freed += w.hands
+
+            if len(items_to_displace) > 1:
+                # Multi-displace: fire on ANY call (initial or force/to_pack) unless
+                # displaced_actions already provided.
+                if displaced_actions is None:
+                    displaced_data = [{
+                        "name": w.name,
+                        "card_image": _item_card_image(w),
+                        "hands": w.hands,
+                        "strength_bonus": w.strength_bonus,
+                    } for w in items_to_displace]
+                    # After the new item leaves pack there will be +1 free slot for displaced weapons
+                    return jsonify({
+                        "error": "multi_displace",
+                        "displaced_items": displaced_data,
+                        "pack_slots_free": player.pack_slots_free + 1,
+                    })
+                else:
+                    # Process each displaced item according to frontend instructions
+                    # First, remove the new item from pack
+                    try:
+                        pi = player.pack.index(item)
+                    except ValueError:
+                        pi = pack_index
+                    player.pack.pop(pi)
+
+                    for i, w in enumerate(items_to_displace):
+                        da = displaced_actions[i] if i < len(displaced_actions) else {"action": "discard"}
+                        if da.get("action") == "to_pack":
+                            dpi = int(da.get("discard_pack_index", -1))
+                            if player.pack_slots_free <= 0:
+                                if dpi >= 0:
+                                    player.evict_pack_slot(dpi)
+                                else:
+                                    # No room and no pack slot to evict — discard instead
+                                    player.unequip(w)
+                                    continue
+                            player.unequip(w)
+                            player.pack.append(w)
+                        else:  # discard
+                            player.unequip(w)
+                    player.equip(item)
+                    from werblers_engine import effects as _fx
+                    _fx.refresh_tokens(player)
+                    return jsonify({"ok": True, "state": _build_state()})
+
+        # --- Single-displacement path (non-weapon slots, or single-weapon swap) ---
         if force or to_pack:
             slot_map = {
                 "helmet": player.helmets,
@@ -547,21 +619,13 @@ def api_equip_from_pack():
             if existing_list:
                 displaced = existing_list[0]
                 if to_pack:
-                    # pack must have room for the displaced item
-                    # (the slot being equipped frees one item space later,
-                    #  but player.pack still contains the new item right now)
-                    # We check against pack_size - (len(pack) - 1) because
-                    # the new item leaves the pack when equipped.
                     if player.pack_slots_used - 1 >= player.pack_size:
                         if discard_pack_index >= 0:
-                            # Discard a pack slot to make room
                             player.evict_pack_slot(discard_pack_index)
                         else:
-                            # Return pack contents so frontend can ask which to discard
-                            pack_data = [{"name": p.name, "card_image": _item_card_image(p.name, p.slot.value)} for p in player.pack]
+                            pack_data = [{"name": p.name, "card_image": _item_card_image(p)} for p in player.pack]
                             return jsonify({"error": "pack_full", "pack": pack_data})
                     player.unequip(displaced)
-                    # Recalculate pack_index in case eviction shifted it
                     try:
                         pi = player.pack.index(item)
                     except ValueError:

@@ -40,8 +40,8 @@ def _bde(player: Player) -> int:
 
 
 def _tough_skin(player: Player) -> int:
-    """Tough Skin (Twisted Treent): +1 Str per item in pack (equip, consumable, or captured monster)."""
-    return len(player.pack) + len(player.consumables) + len(player.captured_monsters)
+    """Tough Skin (Twisted Treant): +10 Str when you have no Chest armour."""
+    return 10 if not player.chest_armor else 0
 
 
 def _bark_worse_than_bite(player: Player) -> int:
@@ -344,9 +344,9 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> tuple[list[
         log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon)!")
 
     elif eid == "kapwing":
-        item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=8)
+        item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=6)
         pending_items.append(item)
-        log.append("  Kapwing!: received Bulletproof Vest (+8 chest)!")
+        log.append("  Kapwing!: received Bulletproof Vest (+6 chest)!")
 
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)
