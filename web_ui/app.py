@@ -406,6 +406,10 @@ def _api_resolve_mystery_inner():
         outcome["trait_description"] = C.TRAIT_DESCRIPTIONS.get(result["trait"].name, "")
     if result.get("curse_name"):
         outcome["curse_name"] = result["curse_name"]
+        outcome["curse_description"] = C.CURSE_DESCRIPTIONS.get(result["curse_name"], "")
+    if result.get("monster_name") and result.get("prize_type") == "curse":
+        outcome["monster_name"] = result["monster_name"]
+        outcome["card_image"] = _monster_card_image(result["monster_name"])
     return jsonify(outcome)
 
 

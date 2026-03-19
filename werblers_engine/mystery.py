@@ -426,6 +426,36 @@ def _materialise_prize(
             return {"prize_type": "nothing", "label": "Deck empty"}
 
     elif prize.prize_type == "curse":
+        # Pick a monster from the tier-appropriate pool that has a curse
+        tier_deck = monster_decks.get(tier)
+        tier_pool = tier_deck.peek_all() if tier_deck else []
+        monsters_with_curses = [m for m in tier_pool if m.curse_name]
+        # Fallback: try all tiers if the tier pool has no cursed monsters
+        if not monsters_with_curses:
+            for t in (1, 2, 3):
+                d = monster_decks.get(t)
+                if d:
+                    monsters_with_curses = [m for m in d.peek_all() if m.curse_name]
+                if monsters_with_curses:
+                    break
+        if monsters_with_curses:
+            import copy as _copy
+            chosen_monster = rng.choice(monsters_with_curses)
+            curse = C.curse_for_monster(chosen_monster)
+            if curse is None:
+                curse = _copy.copy(rng.choice(C.CURSE_POOL)) if C.CURSE_POOL else None
+                chosen_monster = None
+            if curse:
+                player.curses.append(curse)
+                from . import effects as _fx2
+                _fx2.refresh_tokens(player)
+                log.append(f"  Prize: received curse '{curse.name}' (from {chosen_monster.name if chosen_monster else 'unknown'})!")
+                return {
+                    "prize_type": "curse",
+                    "curse_name": curse.name,
+                    "monster_name": chosen_monster.name if chosen_monster else None,
+                    "label": f"Curse: {curse.name}",
+                }
         import copy as _copy
         if C.CURSE_POOL:
             curse = _copy.copy(rng.choice(C.CURSE_POOL))
@@ -434,9 +464,8 @@ def _materialise_prize(
             _fx2.refresh_tokens(player)
             log.append(f"  Prize: received curse '{curse.name}'!")
             return {"prize_type": "curse", "curse_name": curse.name, "label": f"Curse: {curse.name}"}
-        else:
-            log.append("  Prize: no curses available — nothing.")
-            return {"prize_type": "nothing", "label": "Nothing"}
+        log.append("  Prize: no curses available — nothing.")
+        return {"prize_type": "nothing", "label": "Nothing"}
 
     elif prize.prize_type == "trait":
         # Draw a random dead monster and give its trait

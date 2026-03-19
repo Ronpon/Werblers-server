@@ -767,6 +767,7 @@ async function beginMove(cardIndex, direction = 'forward') {
     }
     const ts = data.tile_scene || {};
     if (data.phase === 'done') {
+      document.getElementById('battle-overlay').classList.add('hidden');
       _resumeTierMusic(data.state);
       if (ts.tile_type === 'BLANK') {
         showTileScene(ts, () => loadAndRenderAbilities());
@@ -3588,7 +3589,11 @@ function _getMysteryOutcomeContent(data) {
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `The box contained\u2026 <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'curse') {
-        outcomeText = `The box contained\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!`;
+        const curseMonsterBox = data.monster_name || '';
+        const curseDescBox = data.curse_description ? `<br><span style="font-size:0.85em;color:var(--text-dim);font-style:italic">${data.curse_description}</span>` : '';
+        outcomeText = curseMonsterBox
+          ? `The box contained\u2026 <strong>${curseMonsterBox}</strong>! And with it comes a curse: <strong>${data.curse_name || 'a curse'}</strong>!${curseDescBox}`
+          : `The box contained\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!${curseDescBox}`;
       } else {
         outcomeText = label || 'The mystery has been resolved.';
       }
@@ -3607,7 +3612,11 @@ function _getMysteryOutcomeContent(data) {
       } else if (prizeType === 'item' || prizeType === 'item_up' || prizeType === 'item_t3') {
         outcomeText = `You got <strong>${itemName || 'an item'}</strong>!`;
       } else if (prizeType === 'curse') {
-        outcomeText = `You got\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!`;
+        const curseMonsterW = data.monster_name || '';
+        const curseDescW = data.curse_description ? `<br><span style="font-size:0.85em;color:var(--text-dim);font-style:italic">${data.curse_description}</span>` : '';
+        outcomeText = curseMonsterW
+          ? `You spun\u2026 <strong>${curseMonsterW}</strong>! And with it comes a curse: <strong>${data.curse_name || 'a curse'}</strong>!${curseDescW}`
+          : `You got\u2026 <strong>A CURSE!</strong> You received: <strong>${data.curse_name || 'a curse'}</strong>!${curseDescW}`;
       } else {
         outcomeText = label || 'The wheel has spoken.';
       }
