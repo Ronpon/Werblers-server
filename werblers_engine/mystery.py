@@ -405,6 +405,22 @@ def resolve_beggar(
 # Prize materialisation
 # ---------------------------------------------------------------------------
 
+def _draw_item_balanced(deck: Deck, rng: random.Random):
+    """Draw an item from *deck* with a 50/50 chance of equip vs consumable.
+
+    Falls back to whichever type is still available if one pool is exhausted.
+    Returns None only when the deck is completely empty.
+    """
+    from .types import EquipSlot
+    want_consumable = rng.random() < 0.5
+    primary = lambda i: i.slot == EquipSlot.CONSUMABLE if want_consumable else i.slot != EquipSlot.CONSUMABLE
+    fallback = lambda i: i.slot != EquipSlot.CONSUMABLE if want_consumable else i.slot == EquipSlot.CONSUMABLE
+    item = deck.draw_matching(primary, rng)
+    if item is None:
+        item = deck.draw_matching(fallback, rng)
+    return item
+
+
 def _materialise_prize(
     prize: Prize,
     tier: int,
@@ -417,7 +433,7 @@ def _materialise_prize(
 ) -> dict:
     """Turn an abstract Prize into a concrete result dict."""
     if prize.prize_type == "item":
-        item = item_decks[prize.tier].draw()
+        item = _draw_item_balanced(item_decks[prize.tier], rng)
         if item:
             log.append(f"  Prize: {item.name} (Tier {prize.tier} item)!")
             return {"prize_type": "item", "item": item, "label": prize.label}

@@ -69,3 +69,13 @@ class Deck(Generic[T]):
     def peek_all(self) -> list:
         """Return remaining cards in draw order (next to be drawn first)."""
         return list(reversed(self._cards))
+
+    def draw_matching(self, predicate, rng: random.Random | None = None) -> Optional[T]:
+        """Draw a random item matching *predicate*, or None if none match."""
+        candidates = [c for c in self._cards if predicate(c)]
+        if not candidates:
+            return None
+        _rng = rng or random.Random()
+        chosen = _rng.choice(candidates)
+        self._cards.remove(chosen)
+        return chosen
