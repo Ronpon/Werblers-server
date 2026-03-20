@@ -1576,6 +1576,9 @@ class Game:
             Refuse all consumable-phase auto-decisions to prevent double use."""
             if "consumable" in prompt.lower() or "play a" in prompt.lower():
                 return False
+            # Swiftness flee is handled via the dedicated UI button; never auto-trigger it
+            if "swiftness" in prompt.lower():
+                return False
             return self._decide(prompt, log_)
 
         if combat_type == "miniboss":

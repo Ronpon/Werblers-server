@@ -3,7 +3,8 @@ let gameState   = null;
 let viewingPlayerId = 0;
 let numPlayers  = 1;
 let heroSelections = {};   // slot (int) -> heroId string
-let heroData    = [];
+let heroData    = [];      // hero definitions from server
+let heroAnimMap = {};      // heroId -> {general, victory, defeat}
 // Ability toggles collected before playing a card
 let abilityChoices = {};   // { ability_id: true | {args} }
 
@@ -64,6 +65,11 @@ async function initSetup() {
   }, true);
   const resp = await fetch('/api/heroes');
   heroData = await resp.json();
+  // Build animation map from hero data
+  heroAnimMap = {};
+  for (const h of heroData) {
+    if (h.animations) heroAnimMap[h.id] = h.animations;
+  }
   setNumPlayers(1);
 }
 function setNumPlayers(n) {
@@ -103,21 +109,24 @@ function renderHeroSelectors() {
       card.appendChild(img);
       card.appendChild(nameEl);
       if (!takenByOther) {
+        // Click card: select hero and play animation
         card.addEventListener('click', () => {
           heroSelections[slot] = hero.id;
           renderHeroSelectors();
           checkStartEnabled();
+          _showHeroAnimation(hero.id, 'general');
+        });
+        // Click image only: zoom the card (no animation)
+        img.title = 'Click to zoom';
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', (e) => {
+          e.stopPropagation();
+          heroSelections[slot] = hero.id;
+          renderHeroSelectors();
+          checkStartEnabled();
+          zoomCard(`/images/${hero.card_image}`);
         });
       }
-      // Hover preview — show full card image
-      card.addEventListener('mouseenter', (e) => {
-        const tip = _getPreviewEl();
-        tip.innerHTML = `<img src="/images/${hero.card_image}" alt="${hero.name}">`;
-        tip.classList.remove('hidden');
-        _positionPreview(e);
-      });
-      card.addEventListener('mousemove', _positionPreview);
-      card.addEventListener('mouseleave', () => _getPreviewEl().classList.add('hidden'));
       cardRow.appendChild(card);
     }
     slotDiv.appendChild(cardRow);
@@ -133,6 +142,9 @@ function checkStartEnabled() {
 async function startGame() {
   const heroIds = [];
   for (let i = 0; i < numPlayers; i++) heroIds.push(heroSelections[i]);
+  // Stop any hero animation currently playing
+  const existingPanel = document.getElementById('hero-anim-panel');
+  if (existingPanel) existingPanel.remove();
   const resp = await fetch('/api/new_game', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -357,7 +369,7 @@ function updatePlayerStats(state) {
     <div class="stats-body">
       ${sections.join('') || '<div class="stat-empty">No items yet.</div>'}
     </div>`;
-  attachCardPreviews(document.getElementById('player-stats'));
+  attachCardClickZoom(document.getElementById('player-stats'));
 }
 function statGroup(title, rowsHtml, titleClass = '') {
   return `<div class="stat-group">
@@ -493,13 +505,16 @@ async function _showMultiDisplaceModal(packIndex, displacedItems, packSlotsFree)
         <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:12px">${item.name} (+${item.strength_bonus} Str) must be removed to make room.</div>
         ${img}
         <div style="display:flex;gap:8px;justify-content:center;margin-top:16px">
-          ${canPack ? `<button class="btn-secondary" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve({action:'to_pack'})">Move to Pack</button>` : ''}
-          <button class="btn-danger" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve({action:'discard'})">Discard</button>
-          <button class="btn-secondary" onclick="document.body.removeChild(this.closest('div[style]'));window._mdResolve(null)">Cancel</button>
+          ${canPack ? `<button class="btn-secondary" id="md-pack-btn">Move to Pack</button>` : ''}
+          <button class="btn-danger" id="md-discard-btn">Discard</button>
+          <button class="btn-secondary" id="md-cancel-btn">Cancel</button>
         </div>`;
       overlay.appendChild(box);
       document.body.appendChild(overlay);
-      window._mdResolve = resolve;
+      const packBtn = box.querySelector('#md-pack-btn');
+      if (packBtn) packBtn.addEventListener('click', () => { overlay.remove(); resolve({ action: 'to_pack' }); });
+      box.querySelector('#md-discard-btn').addEventListener('click', () => { overlay.remove(); resolve({ action: 'discard' }); });
+      box.querySelector('#md-cancel-btn').addEventListener('click', () => { overlay.remove(); resolve(null); });
     });
 
     if (result === null) return; // cancelled
@@ -864,7 +879,7 @@ function confirmShopTake() {
 }
 function renderOfferItemCard(item, index, autoSelected) {
   const strSign = item.strength_bonus >= 0 ? '+' : '';
-  const strText = `${strSign}${item.strength_bonus} Str`;
+  const strText = item.strength_bonus !== 0 ? `${strSign}${item.strength_bonus} Str` : '';
   const imgHtml = item.card_image
     ? `<img class="offer-item-img" src="/images/${item.card_image}" alt="${item.name}" onclick="event.stopPropagation();zoomCard(this.src)">`
     : '';
@@ -1100,6 +1115,10 @@ function _attachDragDrop(container) {
         _showMultiDisplaceModal(packIdx, data.displaced_items, data.pack_slots_free);
         return;
       }
+      if (data.error === 'pack_full' && data.pack) {
+        _showEquipFromPackFullModal(packIdx, data.pack, data.displaced_name || '');
+        return;
+      }
       if (data.ok) { gameState = data.state; applyState(data.state); renderPlayerSheetFull(data.state); }
       else { console.warn(data.error || 'Cannot equip here'); }
     });
@@ -1120,13 +1139,17 @@ function _attachDragDrop(container) {
       let info;
       try { info = JSON.parse(e.dataTransfer.getData('text/plain')); } catch (_) { return; }
       if (info.ctx !== 'equip') return;
-      // If dropping onto a filled pack slot, pass its index as discard_pack_index
+      // If dropping onto a filled pack slot, ask what to do with the pack item
       const targetPackIdx = slotEl.dataset.packIdx;
-      const extra = {};
       if (targetPackIdx !== undefined && targetPackIdx !== '' && parseInt(targetPackIdx, 10) >= 0) {
-        extra.discard_pack_index = parseInt(targetPackIdx, 10);
+        const dpi = parseInt(targetPackIdx, 10);
+        const packItemName = slotEl.dataset.itemName || 'this item';
+        const isConsumable = slotEl.dataset.isConsumable === 'true';
+        // Show equip/drop prompt for the existing pack item
+        _showPackSwapPrompt(packItemName, isConsumable, info.slotKey, parseInt(info.slotIdx, 10), dpi);
+      } else {
+        await manageItem('to_pack', info.slotKey, parseInt(info.slotIdx, 10), {});
       }
-      await manageItem('to_pack', info.slotKey, parseInt(info.slotIdx, 10), extra);
     });
   });
 }
@@ -1177,6 +1200,90 @@ function _showPackDiscardChoice(packItems, origAction, origSource, origIdx) {
     await manageItem(origAction, origSource, origIdx, { discard_pack_index: dpi });
   };
   window._cancelPackDiscard = () => overlay.remove();
+}
+
+function _showPackSwapPrompt(packItemName, isConsumable, slotKey, slotIdx, discardPackIdx) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 28px;max-width:420px;text-align:center';
+  box.innerHTML = `
+    <div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:12px">Pack Item</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:20px">What would you like to do with <strong>${packItemName}</strong>?</div>
+    <div style="display:flex;gap:12px;justify-content:center">
+      ${!isConsumable ? `<button class="btn-secondary" id="pack-swap-equip">Equip</button>` : ''}
+      <button class="btn-danger" id="pack-swap-drop">Drop</button>
+      <button class="btn-secondary" id="pack-swap-cancel">Cancel</button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  const equipBtn = box.querySelector('#pack-swap-equip');
+  if (equipBtn) {
+    equipBtn.addEventListener('click', async () => {
+      overlay.remove();
+      await manageItem('to_pack', slotKey, slotIdx, { discard_pack_index: discardPackIdx, swap_to_equip: true });
+    });
+  }
+  box.querySelector('#pack-swap-drop').addEventListener('click', async () => {
+    overlay.remove();
+    await manageItem('to_pack', slotKey, slotIdx, { discard_pack_index: discardPackIdx });
+  });
+  box.querySelector('#pack-swap-cancel').addEventListener('click', () => overlay.remove());
+}
+
+function _showEquipFromPackFullModal(packIndex, packItems, displacedName) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:20px 24px;max-width:540px;text-align:center';
+  const dispText = displacedName ? ` to make room for <strong>${displacedName}</strong>` : '';
+  box.innerHTML = `
+    <div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:8px">Pack Full</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:16px">Choose a pack item to remove${dispText}:</div>
+    <div id="efp-items" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center"></div>
+    <div style="margin-top:16px"><button class="btn-secondary" id="efp-cancel">Cancel</button></div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  const itemsDiv = box.querySelector('#efp-items');
+  packItems.forEach((item, i) => {
+    const cell = document.createElement('div');
+    cell.style.cssText = 'text-align:center;width:96px;';
+    const img = item.card_image ? `<img src="/images/${item.card_image}" style="width:72px;border-radius:4px;display:block;margin:0 auto">` : '';
+    cell.innerHTML = `${img}<div style="font-size:10px;color:var(--text,#e0e0e0);margin-top:4px;word-break:break-word">${item.name}</div>`;
+    const btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:4px;justify-content:center;margin-top:5px;';
+    const discardBtn = document.createElement('button');
+    discardBtn.className = 'btn-danger';
+    discardBtn.style.cssText = 'font-size:10px;padding:3px 7px;';
+    discardBtn.textContent = 'Discard';
+    discardBtn.addEventListener('click', async () => {
+      overlay.remove();
+      const r = await fetch('/api/equip_from_pack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pack_index: packIndex, to_pack: true, discard_pack_index: i }) });
+      const d = await r.json();
+      if (d.ok) { gameState = d.state; applyState(d.state); renderPlayerSheetFull(d.state); }
+      else { alert(d.error || 'Cannot equip here'); }
+    });
+    btnRow.appendChild(discardBtn);
+    if (!item.is_consumable) {
+      const equipBtn = document.createElement('button');
+      equipBtn.className = 'btn-secondary';
+      equipBtn.style.cssText = 'font-size:10px;padding:3px 7px;';
+      equipBtn.textContent = 'Equip';
+      equipBtn.addEventListener('click', async () => {
+        overlay.remove();
+        const r = await fetch('/api/equip_from_pack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pack_index: packIndex, to_pack: true, discard_pack_index: i, equip_displaced: true }) });
+        const d = await r.json();
+        if (d.ok) { gameState = d.state; applyState(d.state); renderPlayerSheetFull(d.state); }
+        else { alert(d.error || 'Cannot equip here'); }
+      });
+      btnRow.appendChild(equipBtn);
+    }
+    cell.appendChild(btnRow);
+    itemsDiv.appendChild(cell);
+  });
+  box.querySelector('#efp-cancel').addEventListener('click', () => overlay.remove());
 }
 
 async function _discardConsumable(consumableIdx) {
@@ -1573,6 +1680,14 @@ function attachCardPreviews(container) {
     el.addEventListener('mouseleave', () => _getPreviewEl().classList.add('hidden'));
   });
 }
+function attachCardClickZoom(container) {
+  container.querySelectorAll('.has-card-preview').forEach(el => {
+    const src = el.dataset.cardImage;
+    if (!src) return;
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', () => zoomCard(src));
+  });
+}
 function _positionPreview(e) {
   const tip = _getPreviewEl();
   const tipW = tip.offsetWidth || 340;
@@ -1612,7 +1727,25 @@ async function closeTileScene() {
   document.getElementById('battle-overlay').classList.add('hidden');
   if (_tileSceneCallback) { const cb = _tileSceneCallback; _tileSceneCallback = null; await cb(); }
 }
+function _heroIdFromImageSrc(src) {
+  for (const h of heroData) {
+    if (src && h.card_image && src.includes(h.card_image)) return h.id;
+  }
+  // Also check current game state players
+  if (gameState) {
+    for (const p of gameState.players) {
+      if (p.hero_card_image && src && src.includes(p.hero_card_image)) return p.hero_id;
+    }
+  }
+  return null;
+}
 function zoomCard(src) {
+  // If this is a hero portrait, show the animation instead of the zoom modal
+  const heroId = _heroIdFromImageSrc(src);
+  if (heroId) {
+    _showHeroAnimation(heroId, 'general');
+    return;
+  }
   const modal = document.getElementById('card-zoom-modal');
   modal.querySelector('img').src = src;
   modal.classList.remove('hidden');
@@ -1643,12 +1776,19 @@ function _showFightIntro(combat, state, onContinue) {
   const monsterImg = combat.card_image ? `/images/${combat.card_image}` : '';
   const bg = combat.background ? `/images/${combat.background}` : '';
 
+  // Use hero animation video for the versus intro if available
+  const heroAnims = combat.hero_animations || (p && p.hero_animations) || {};
+  const generalAnimSrc = heroAnims.general ? `/videos/${heroAnims.general}` : '';
+  const heroVisual = generalAnimSrc
+    ? `<video class="fight-intro-card" src="${generalAnimSrc}" autoplay muted playsinline style="border-radius:10px"></video>`
+    : (heroImg ? `<img class="fight-intro-card" src="${heroImg}" alt="${playerName}">` : '');
+
   overlay.innerHTML = `
     <div class="battle-bg" style="background-image: url('${bg}')"></div>
     <div class="fight-intro-content">
       <div class="fight-intro-hero fight-intro-offscreen-left">
         <div class="fight-intro-name fight-intro-hero-name">${playerName}</div>
-        ${heroImg ? `<img class="fight-intro-card" src="${heroImg}" alt="${playerName}">` : ''}
+        ${heroVisual}
       </div>
       <div class="fight-intro-vs fight-intro-offscreen-top">VS</div>
       <div class="fight-intro-monster fight-intro-offscreen-right">
@@ -1834,6 +1974,13 @@ function _renderPreFightScene(combat, state) {
     <button type="button" class="btn-flee">Flee back 13 spaces?</button>
   </div>` : '';
 
+  // Swiftness trait: flee at no cost
+  const canSwiftnessFlee = (combat.category === 'monster' || combat.category === 'miniboss')
+    && combat.has_swiftness;
+  const swiftnessFleeBtnHtml = canSwiftnessFlee
+    ? `<button type="button" class="btn-flee btn-flee-swiftness" onclick="doSwiftnessFlee()">Flee? [Swiftness]</button>`
+    : '';
+
   overlay.innerHTML = `
     <div class="battle-bg" style="background-image: url('${bg}')"></div>
     <div class="battle-content">
@@ -1866,6 +2013,7 @@ function _renderPreFightScene(combat, state) {
           </button>
         </div>` : ''}
         <div class="battle-actions">
+          ${swiftnessFleeBtnHtml}
           <button class="btn-primary btn-fight" onclick="doFight()">&#x2694; Fight!</button>
           ${fleeBtnHtml}
         </div>
@@ -1889,19 +2037,35 @@ async function doFlee() {
       return;
     }
     if (data.error) { alert(data.error); return; }
-    // Show "You Fled!" screen instead of immediately returning to board
     _pendingFleeState = data.state || null;
-    const overlay = document.getElementById('battle-overlay');
-    overlay.classList.remove('hidden');
-    overlay.innerHTML = `
-      <div class="battle-content fled-screen">
-        <div class="fled-title">&#x1F3C3; You Fled!</div>
-        <div class="fled-msg">No trait or curse gained.</div>
-        <button class="btn-primary" style="margin-top:24px" onclick="_finishFlee()">Continue</button>
-      </div>`;
+    _showFledScreen(_preFightCombat ? `/images/${_preFightCombat.background}` : '');
   } catch(e) {
     alert('Network error during flee: ' + e.message);
   }
+}
+
+async function doSwiftnessFlee() {
+  try {
+    const resp = await fetch('/api/swiftness_flee', { method: 'POST' });
+    let data;
+    try { data = await resp.json(); } catch(e) { alert('Network error'); return; }
+    if (data.error) { alert(data.error); return; }
+    _pendingFleeState = data.state || null;
+    _showFledScreen(_preFightCombat ? `/images/${_preFightCombat.background}` : '');
+  } catch(e) {
+    alert('Network error during flee: ' + e.message);
+  }
+}
+
+function _showFledScreen(bg) {
+  const overlay = document.getElementById('battle-overlay');
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = `
+    <div class="battle-bg" style="background-image: url('${bg}')"></div>
+    <div style="position:relative;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:24px;">
+      <div style="font-family:'Cinzel',serif;font-size:48px;color:var(--gold,#c9a84c);text-shadow:0 2px 20px #000,0 0 40px rgba(0,0,0,0.8);">You Fled</div>
+      <button class="btn-primary" onclick="_finishFlee()">Continue</button>
+    </div>`;
 }
 
 function _finishFlee() {
@@ -2113,6 +2277,12 @@ let _consumableModalOnClose = null;
 
 function _closeConsumableModal() {
   const el = _getConsumableModal();
+  // Stop embedded video if playing
+  const vid = el.querySelector('video');
+  if (vid) { vid.pause(); }
+  // Remove floating anim panel too
+  const panel = document.getElementById('hero-anim-panel');
+  if (panel) panel.remove();
   el.classList.add('hidden');
   if (_consumableModalOnClose) {
     const cb = _consumableModalOnClose;
@@ -2123,14 +2293,36 @@ function _closeConsumableModal() {
 
 function _showConsumableResultModal({ title, monsterName, monsterImg, resultName, resultDesc, resultClass, onClose }) {
   _consumableModalOnClose = onClose || null;
+  // Build video for trait (victory) or curse (defeat)
+  let videoHtml = '';
+  if (gameState) {
+    const animType = resultClass === 'result-trait' ? 'victory' : resultClass === 'result-curse' ? 'defeat' : null;
+    if (animType) {
+      const p = gameState.players.find(x => x.is_current) || gameState.players[0];
+      if (p && p.hero_id && heroAnimMap[p.hero_id] && heroAnimMap[p.hero_id][animType]) {
+        const vsrc = `/videos/${heroAnimMap[p.hero_id][animType]}`;
+        videoHtml = `<video src="${vsrc}" autoplay muted playsinline style="max-width:220px;width:100%;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.7);"></video>`;
+      }
+    }
+  }
   const el = _getConsumableModal();
   const mImg = monsterImg ? `<img class="consumable-modal-card-img" src="${monsterImg}" alt="${monsterName}" onclick="zoomCard(this.src)">` : '';
-  el.innerHTML = `<div class="consumable-modal-box">
-    <h3 class="consumable-modal-title">${title}</h3>
+  // Side-by-side: animation left, card+text right
+  const hasSideContent = videoHtml || mImg;
+  const leftCol = videoHtml ? `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center">${videoHtml}</div>` : '';
+  const mImgHtml = mImg ? `<div style="margin-bottom:6px">${mImg}</div>` : '';
+  const rightCol = `<div style="display:flex;flex-direction:column;align-items:center;gap:8px">
     ${monsterName ? `<div class="consumable-result-from">Drew: <strong>${monsterName}</strong></div>` : ''}
-    ${mImg}
+    ${mImgHtml}
     <div class="consumable-result-name ${resultClass}">${resultName}</div>
     ${resultDesc ? `<div class="consumable-result-desc">${resultDesc}</div>` : ''}
+  </div>`;
+  const bodyHtml = hasSideContent
+    ? `<div style="display:flex;gap:20px;align-items:center;justify-content:center;flex-wrap:wrap">${leftCol}${rightCol}</div>`
+    : rightCol;
+  el.innerHTML = `<div class="consumable-modal-box">
+    <h3 class="consumable-modal-title">${title}</h3>
+    ${bodyHtml}
     <div class="consumable-modal-actions">
       <button class="btn-primary" onclick="_closeConsumableModal()">OK</button>
     </div>
@@ -2269,6 +2461,25 @@ async function closeBattleScene() {
 
 function showGainModal(combat) {
   let html = '';
+  const animType = combat.trait_gained ? 'victory' : combat.curse_gained ? 'defeat' : null;
+  // Build video element inline if we have an animation
+  let videoHtml = '';
+  let heroId = null;
+  if (animType && gameState) {
+    const fightPlayer = gameState.players.find(x => x.player_id === combat.player_id) || gameState.players.find(x => x.is_current);
+    if (fightPlayer) heroId = fightPlayer.hero_id;
+  }
+  if (heroId && heroAnimMap[heroId] && heroAnimMap[heroId][animType]) {
+    const vsrc = `/videos/${heroAnimMap[heroId][animType]}`;
+    videoHtml = `<video id="gain-modal-video" src="${vsrc}" autoplay muted playsinline></video>`;
+  }
+  // Monster card
+  const monsterCardEl = document.getElementById('gain-modal-monster-card');
+  if (monsterCardEl) {
+    monsterCardEl.innerHTML = combat.card_image
+      ? `<img src="/images/${combat.card_image}" style="max-width:130px;border-radius:8px;box-shadow:0 2px 12px rgba(0,0,0,0.5);display:block;">`
+      : '';
+  }
   if (combat.trait_gained) {
     html += `<div class="gain-modal-item is-trait">
       <div class="gain-modal-type">Trait Gained</div>
@@ -2284,10 +2495,23 @@ function showGainModal(combat) {
     </div>`;
   }
   document.getElementById('gain-modal-body').innerHTML = html;
+  // Inject video into first grid cell (top-left)
+  const gainContent = document.getElementById('gain-modal-content');
+  const existingVideo = document.getElementById('gain-modal-video');
+  if (existingVideo) existingVideo.remove();
+  if (videoHtml) {
+    gainContent.insertAdjacentHTML('afterbegin', videoHtml);
+  }
   document.getElementById('gain-modal').classList.remove('hidden');
 }
 
 async function closeGainModal() {
+  // Stop the embedded animation video if playing
+  const vid = document.getElementById('gain-modal-video');
+  if (vid) { vid.pause(); vid.remove(); }
+  // Remove any stray floating animation panel too
+  const panel = document.getElementById('hero-anim-panel');
+  if (panel) panel.remove();
   document.getElementById('gain-modal').classList.add('hidden');
   // Check for pending trait items (items received from traits that need placement)
   await _placePendingTraitItems();
@@ -2327,7 +2551,7 @@ async function _placePendingTraitItems(forPlayerId) {
         monsterName: '',
         monsterImg: '',
         resultName: item.name,
-        resultDesc: `+${item.strength_bonus} Str (${item.slot})`,
+        resultDesc: item.strength_bonus !== 0 ? `+${item.strength_bonus} Str (${item.slot})` : `(${item.slot})`,
         resultClass: 'result-trait',
         onClose: resolve,
       });
@@ -2406,6 +2630,21 @@ function _playerStrBreakdown(p) {
     if (item.strength_bonus) lines.push(`${item.name}: ${item.strength_bonus >= 0 ? '+' : ''}${item.strength_bonus}`);
     if (item.tokens) lines.push(`  ${item.name} (effect): +${item.tokens}`);
   }
+  // Hero abilities: Brunhilde's Luscious Locks & Skimpy Armour, Rizzt's Night Stalker
+  if (p.hero_id === 'BRUNHILDE') {
+    if (!(p.helmets && p.helmets.length)) {
+      lines.push('Luscious Locks (no helmet): +5');
+    }
+    for (const item of (p.chest_armor || [])) {
+      const skimpyBonus = Math.max(0, 8 - item.strength_bonus);
+      if (skimpyBonus > 0) {
+        lines.push(`Skimpy Armour (${item.name}): +${skimpyBonus} extra`);
+      }
+    }
+  }
+  if (p.hero_id === 'RIZZT' && gameState && gameState.is_night) {
+    lines.push('Night Stalker (night): +3');
+  }
   for (const t of (p.traits||[])) {
     if (t.strength_bonus) lines.push(`${t.name}: ${t.strength_bonus >= 0 ? '+' : ''}${t.strength_bonus}`);
     if (t.tokens) lines.push(`${t.name} (effect): +${t.tokens}`);
@@ -2461,7 +2700,7 @@ function renderPlayerSheetFull(state) {
 
   // ---- Pack slots ----
   const packItems = [
-    ...p.pack.map((i, realIdx) => ({ label: i.name, sub: (i.strength_bonus >= 0 ? '+' : '') + i.strength_bonus + ' Str', card_image: i.card_image, realPackIdx: realIdx, isConsumable: i.is_consumable || false, isCapturedMonster: false })),
+    ...p.pack.map((i, realIdx) => ({ label: i.name, sub: i.strength_bonus !== 0 ? ((i.strength_bonus >= 0 ? '+' : '') + i.strength_bonus + ' Str') : '', card_image: i.card_image, realPackIdx: realIdx, isConsumable: i.is_consumable || false, isCapturedMonster: false })),
     ...(p.consumables || []).map((c, ci) => ({ label: c.name, sub: 'Consumable', card_image: c.card_image, realPackIdx: -1, isConsumable: true, isCapturedMonster: false, consumableIdx: ci, effectId: c.effect_id })),
     ...(p.captured_monsters || []).map((m, ci) => ({ label: m.name, sub: 'Captured Monster', card_image: m.card_image, realPackIdx: -1, isConsumable: false, isCapturedMonster: true, capturedMonsterIdx: ci, level: m.level || 1 })),
   ];
@@ -2634,13 +2873,14 @@ function _psSlotCell(label, item, slotKey, slotIdx) {
         </div></div>`;
     }
     const strSign = item.strength_bonus >= 0 ? '+' : '';
+    const strSub = item.strength_bonus !== 0 ? `${strSign}${item.strength_bonus} Str` : '';
     const badges = item.tokens ? ' ' + tokenBadges(item.tokens) : '';
     return `<div class="ps-equip-cell">
       <div class="ps-slot-title-above">${label}</div>
       <div class="ps-slot ps-slot-filled${placementClass}" ${placementAttr}>
         <div class="ps-slot-divider"></div>
         <div class="ps-slot-name">${item.name}${badges}</div>
-        <div class="ps-slot-sub">${strSign}${item.strength_bonus} Str</div>
+        ${strSub ? `<div class="ps-slot-sub">${strSub}</div>` : ''}
       </div></div>`;
   }
   // Empty slot
@@ -3149,9 +3389,24 @@ function _renderMysteryBox(event, player) {
     }</div>`;
   }
   html += `<div class="mystery-btn-row">
+    <button class="btn-secondary" onclick="_mysteryBoxBack()">Back</button>
     <button class="btn-primary" id="mystery-confirm-btn" onclick="_resolveMysteryBox(_mysterySelectedIdx)" disabled>Discard &amp; Open</button>
   </div>`;
   return html;
+}
+
+function _mysteryBoxBack() {
+  // Return to the initial mystery event screen (yes/decline prompt)
+  const bodyEl = document.querySelector('.mystery-fs-body');
+  if (!bodyEl) return;
+  const event = _pendingMysteryEvent;
+  if (!event) return;
+  bodyEl.innerHTML = `
+    <p class="mystery-info">Discard an item to open?</p>
+    <div class="mystery-btn-row">
+      <button class="btn-primary" onclick="_showMysteryBoxWager()">Yes (discard one item)</button>
+      <button class="btn-secondary" onclick="_mysteryBoxDecline()">Decline</button>
+    </div>`;
 }
 
 function _renderTheWheel(event) {
@@ -3678,6 +3933,25 @@ async function _showMysteryOutcome(data, onContinue) {
   const bg = `/images/Events/${imgName} Tier ${tier}.png`;
   // Show a specific card (stolen item, monster card) if provided
   const featuredCard = data.card_image || data.combat_info?.card_image || null;
+
+  // Determine animation type
+  let animVideoHtml = '';
+  if (gameState) {
+    const prizeType = data.prize_type || '';
+    let animType = null;
+    if ((eventId === 'thief' || eventId === 'bandits') && prizeType === 'stolen') animType = 'defeat';
+    else if (prizeType === 'trait') animType = 'victory';
+    else if (prizeType === 'curse') animType = 'defeat';
+    if (animType) {
+      const p = gameState.players.find(x => x.is_current) || gameState.players[0];
+      if (p && p.hero_id && heroAnimMap[p.hero_id] && heroAnimMap[p.hero_id][animType]) {
+        const vsrc = `/videos/${heroAnimMap[p.hero_id][animType]}`;
+        animVideoHtml = `<video id="mystery-anim-video" src="${vsrc}" autoplay muted playsinline
+          style="position:absolute;bottom:20px;right:20px;max-width:300px;width:28vw;border-radius:12px;box-shadow:0 0 30px rgba(0,0,0,0.8);z-index:10;pointer-events:none;"></video>`;
+      }
+    }
+  }
+
   const overlay = document.getElementById('battle-overlay');
 
   overlay.innerHTML = `
@@ -3692,11 +3966,15 @@ async function _showMysteryOutcome(data, onContinue) {
           <button class="btn-primary" id="mystery-outcome-btn">Continue</button>
         </div>
       </div>
-    </div>`;
+    </div>
+    ${animVideoHtml}`;
   overlay.classList.remove('hidden');
 
   return new Promise(resolve => {
     document.getElementById('mystery-outcome-btn').onclick = () => {
+      // Stop embedded video on continue
+      const vid = overlay.querySelector('#mystery-anim-video');
+      if (vid) { vid.pause(); vid.remove(); }
       if (onContinue) onContinue();
       resolve();
     };
@@ -3890,6 +4168,48 @@ async function _resolveMinion(replaceIndex) {
   }
 }
 
+
+// ================================================================ HERO ANIMATION SYSTEM
+// Displays hero animation videos in a panel to the right of the screen.
+// Position is configurable via the _heroAnimPosition object.
+
+const _heroAnimPosition = { top: '50%', right: '40px', transform: 'translateY(-50%)', maxWidth: '380px' };
+
+function _showHeroAnimation(heroId, animType, onEnd) {
+  const anims = heroAnimMap[heroId];
+  if (!anims || !anims[animType]) { if (onEnd) onEnd(); return; }
+  const src = `/videos/${anims[animType]}`;
+  // Remove any existing animation panel
+  const existing = document.getElementById('hero-anim-panel');
+  if (existing) existing.remove();
+
+  const panel = document.createElement('div');
+  panel.id = 'hero-anim-panel';
+  panel.style.cssText = `position:fixed;top:${_heroAnimPosition.top};right:${_heroAnimPosition.right};transform:${_heroAnimPosition.transform};max-width:${_heroAnimPosition.maxWidth};z-index:500;pointer-events:none;`;
+
+  const video = document.createElement('video');
+  video.src = src;
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  video.style.cssText = 'width:100%;border-radius:12px;box-shadow:0 0 30px rgba(0,0,0,0.7);';
+  video.addEventListener('ended', () => {
+    panel.remove();
+    if (onEnd) onEnd();
+  });
+  video.addEventListener('error', () => {
+    panel.remove();
+    if (onEnd) onEnd();
+  });
+  panel.appendChild(video);
+  document.body.appendChild(panel);
+}
+
+function _showHeroAnimationForPlayer(state, animType, onEnd) {
+  const p = state.players.find(x => x.is_current) || state.players[0];
+  if (!p || !p.hero_id) { if (onEnd) onEnd(); return; }
+  _showHeroAnimation(p.hero_id, animType, onEnd);
+}
 
 // ================================================================ INIT
 window.addEventListener('DOMContentLoaded', initSetup);

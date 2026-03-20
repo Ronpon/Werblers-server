@@ -15,6 +15,7 @@ app = Flask(__name__)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_DIR = os.path.join(BASE_DIR, "Images")
 MUSIC_DIR  = os.path.join(BASE_DIR, "Music")
+VIDEOS_DIR = os.path.join(BASE_DIR, "Videos")
 _game: Optional[Game] = None
 _last_log: list[str] = []
 _pending_log: list[str] = []   # log lines from begin_move, prepended to resolve_offer log
@@ -30,6 +31,29 @@ _CARD_IMG_MAP: dict[str, str] = {
     "BRUNHILDE": "Heroes/Brunhilde the Bodacious Card.png",
     "RIZZT":     "Heroes/Rizzt No'Cappin Card.png",
 }
+
+_HERO_ANIM_MAP: dict[str, dict[str, str]] = {
+    "BILLFOLD": {
+        "general": "Hero Animations/Billfold General.mp4",
+        "victory": "Hero Animations/Billfold Victory.mp4",
+        "defeat":  "Hero Animations/Billfold Defeat.mp4",
+    },
+    "GREGORY": {
+        "general": "Hero Animations/Gregory General.mp4",
+        "victory": "Hero Animations/Gregory Victory.mp4",
+        "defeat":  "Hero Animations/Gregory Defeat.mp4",
+    },
+    "BRUNHILDE": {
+        "general": "Hero Animations/Brumhilde General.mp4",
+        "victory": "Hero Animations/Brumhilde Victory.mp4",
+        "defeat":  "Hero Animations/Brumhilde Defeat.mp4",
+    },
+    "RIZZT": {
+        "general": "Hero Animations/Rizzt General.mp4",
+        "victory": "Hero Animations/Rizzt Victory.mp4",
+        "defeat":  "Hero Animations/Rizzt Defeat.mp4",
+    },
+}
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -42,6 +66,9 @@ def serve_image(filename: str):
 @app.route("/music/<path:filename>")
 def serve_music(filename: str):
     return send_from_directory(MUSIC_DIR, filename)
+@app.route("/videos/<path:filename>")
+def serve_video(filename: str):
+    return send_from_directory(VIDEOS_DIR, filename)
 @app.route("/api/heroes")
 def api_heroes():
     result = []
@@ -52,6 +79,7 @@ def api_heroes():
             "title":       hero.title,
             "description": hero.description,
             "card_image":  _CARD_IMG_MAP.get(hero_id.name, ""),
+            "animations":  _HERO_ANIM_MAP.get(hero_id.name, {}),
         })
     return jsonify(result)
 @app.route("/api/new_game", methods=["POST"])
@@ -516,6 +544,7 @@ def api_equip_from_pack():
     force   = bool(data.get("force",   False))
     to_pack = bool(data.get("to_pack", False))
     discard_pack_index = int(data.get("discard_pack_index", -1))
+    equip_displaced = bool(data.get("equip_displaced", False))
     displaced_actions = data.get("displaced_actions", None)
     player = _game.current_player
     if pack_index < 0 or pack_index >= len(player.pack):
@@ -595,10 +624,15 @@ def api_equip_from_pack():
                 if to_pack:
                     if player.pack_slots_used - 1 >= player.pack_size:
                         if discard_pack_index >= 0:
+                            evicted_pack_item = player.pack[discard_pack_index] if equip_displaced else None
                             player.evict_pack_slot(discard_pack_index)
                         else:
-                            pack_data = [{"name": p.name, "card_image": _item_card_image(p)} for p in player.pack]
-                            return jsonify({"error": "pack_full", "pack": pack_data})
+                            pack_data = [{"name": p.name, "card_image": _item_card_image(p),
+                                          "is_consumable": p.slot.value == "consumable"} for p in player.pack]
+                            return jsonify({"error": "pack_full", "pack": pack_data,
+                                            "displaced_name": displaced.name})
+                    else:
+                        evicted_pack_item = None
                     player.unequip(displaced)
                     try:
                         pi = player.pack.index(item)
@@ -607,6 +641,11 @@ def api_equip_from_pack():
                     player.pack.pop(pi)
                     player.pack.insert(min(pi, len(player.pack)), displaced)
                     player.equip(item)
+                    if equip_displaced and evicted_pack_item is not None:
+                        if player.can_equip(evicted_pack_item):
+                            player.equip(evicted_pack_item)
+                        else:
+                            player.pack.append(evicted_pack_item)
                     from werblers_engine import effects as _fx
                     _fx.refresh_tokens(player)
                     return jsonify({"ok": True, "state": _build_state()})
@@ -663,17 +702,22 @@ def api_manage_item():
         if source == "pack":
             return jsonify({"error": "Already in pack"}), 400
         discard_pack_idx = data.get("discard_pack_index")
+        swap_to_equip = bool(data.get("swap_to_equip", False))
         if discard_pack_idx is not None:
             # User explicitly chose a slot to replace
             dpi = int(discard_pack_idx)
             if 0 <= dpi < len(player.pack):
-                player.pack.pop(dpi)
+                displaced_item = player.pack.pop(dpi)
             else:
                 return jsonify({"error": "Invalid pack discard index"}), 400
         elif player.pack_slots_free <= 0:
             return jsonify({"error": "pack_full", "pack": [_ser_item(i) for i in player.pack]}), 409
+        else:
+            displaced_item = None
         player.unequip(item)
         player.pack.append(item)
+        if swap_to_equip and displaced_item is not None:
+            player.equip(displaced_item)
         from werblers_engine import effects as _fx
         _fx.refresh_tokens(player)
         return jsonify({"ok": True, "state": _build_state()})
@@ -1058,6 +1102,38 @@ def api_bystander_consumable():
         ]
     return jsonify({"ok": True, "combat_info": combat_info, "state": _build_state()})
 
+@app.route("/api/swiftness_flee", methods=["POST"])
+def api_swiftness_flee():
+    """Swiftness trait: flee from pending monster/miniboss at no cost (no position change)."""
+    global _last_log
+    try:
+        if _game is None:
+            return jsonify({"error": "No game in progress"}), 400
+        if _game._pending_combat is None:
+            return jsonify({"error": "No pending combat"}), 400
+        player = _game.current_player
+        if not any(t.effect_id == "swiftness" for t in player.traits):
+            return jsonify({"error": "Player does not have Swiftness"}), 400
+        pc = _game._pending_combat
+        if pc.get("type", "monster") == "werbler":
+            return jsonify({"error": "Cannot flee from the Werbler!"}), 400
+        _game._pending_combat = None
+        log = pc["log"]
+        monster = pc.get("monster")
+        if monster:
+            log.append(f"  Swiftness: {player.name} flees from {monster.name}! No combat.")
+        _game._prefight_str_bonus = 0
+        _game._prefight_monster_str_bonus = 0
+        _game._finish_post_encounter(player, log)
+        _game._advance_turn()
+        _last_log = log
+        return jsonify({"phase": "done", "state": _build_state()})
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": f"Server error: {exc}"}), 500
+
+
 @app.route("/api/flee", methods=["POST"])
 def api_flee():
     """Billfold: Fly, you dummy! — flee the pending monster or miniboss combat."""
@@ -1372,6 +1448,11 @@ def _enrich_combat_info(info: dict) -> dict:
     hero_id = info.get("hero_id")
     if hero_id:
         info["hero_card_image"] = _CARD_IMG_MAP.get(hero_id, "")
+        info["hero_animations"] = _HERO_ANIM_MAP.get(hero_id, {})
+    # Add swiftness flag for pre-fight flee button
+    if _game is not None:
+        _pfp = _game.current_player
+        info["has_swiftness"] = any(t.effect_id == "swiftness" for t in _pfp.traits)
     # Add descriptions for trait/curse gained
     trait_name = info.get("trait_gained")
     if trait_name:
@@ -1489,6 +1570,7 @@ def _build_state() -> dict:
             "hero_id":            hid,
             "token_image":        _TOKEN_MAP.get(hid) if hid else None,
             "hero_card_image":    _CARD_IMG_MAP.get(hid) if hid else None,
+            "hero_animations":    _HERO_ANIM_MAP.get(hid, {}) if hid else {},
             "movement_hand":      list(p.movement_hand),
             "is_current":         p is current,
             # Detailed equipment (with tokens for rendering +/-1 token badges)

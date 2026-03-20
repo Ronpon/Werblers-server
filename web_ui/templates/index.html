@@ -165,8 +165,12 @@
 <!-- Post-battle gain modal -->
 <div id="gain-modal" class="hidden">
   <div id="gain-modal-content">
-    <div id="gain-modal-body"></div>
-    <button class="btn-primary" onclick="closeGainModal()">Continue</button>
+    <!-- video injected here by JS (top-left grid cell) -->
+    <div id="gain-modal-right">
+      <div id="gain-modal-monster-card"></div>
+      <div id="gain-modal-body"></div>
+    </div>
+    <button id="gain-modal-continue" class="btn-primary" onclick="closeGainModal()">Continue</button>
   </div>
 </div>
 
@@ -226,6 +230,6 @@
   </div>
 </div>
 
-<script src="{{ url_for('static', filename='js/game.js') }}?v=20260320"></script>
+<script src="{{ url_for('static', filename='js/game.js') }}?v=20260320f"></script>
 </body>
 </html>
