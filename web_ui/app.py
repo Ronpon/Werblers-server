@@ -1565,6 +1565,7 @@ def _build_state() -> dict:
         players_data.append({
             "player_id":          p.player_id,
             "name":               p.name,
+            "hero_name":          p.name,
             "position":           p.position,
             "strength":           p.combat_strength(),
             "hero_id":            hid,

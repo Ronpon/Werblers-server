@@ -1171,7 +1171,7 @@ class Game:
         # 13. Determine effective encounter type (night override)
         actual_type = tile.tile_type
         if self.is_night and actual_type not in (
-            TileType.MINIBOSS, TileType.WERBLER, TileType.DAY_NIGHT, TileType.MYSTERY,
+            TileType.MINIBOSS, TileType.WERBLER, TileType.DAY_NIGHT,
         ):
             log.append("  Night override \u2192 Monster encounter.")
             actual_type = TileType.MONSTER

@@ -264,7 +264,21 @@ def resolve_the_smith(
                     names.append(item.name)
         log.append(f"The Smith: traded {', '.join(names)}.")
         next_tier = min(tier + 1, 3)
-        reward = item_decks[next_tier].draw()
+        # Smith only gives equip items, never consumables
+        reward = None
+        skipped: list = []
+        for _ in range(50):  # safety limit
+            candidate = item_decks[next_tier].draw()
+            if candidate is None:
+                break
+            if candidate.is_consumable:
+                skipped.append(candidate)
+            else:
+                reward = candidate
+                break
+        # Put skipped consumables back
+        for s in skipped:
+            item_decks[next_tier].put_bottom(s)
         if reward:
             log.append(f"The Smith: received {reward.name} (Tier {next_tier})!")
             return {"prize_type": "item", "item": reward, "label": f"Tier {next_tier} item"}
