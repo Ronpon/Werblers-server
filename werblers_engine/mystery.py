@@ -476,24 +476,23 @@ def _materialise_prize(
                 curse = _copy.copy(rng.choice(C.CURSE_POOL)) if C.CURSE_POOL else None
                 chosen_monster = None
             if curse:
-                player.curses.append(curse)
-                from . import effects as _fx2
-                _fx2.refresh_tokens(player)
-                log.append(f"  Prize: received curse '{curse.name}' (from {chosen_monster.name if chosen_monster else 'unknown'})!")
+                from .encounters import _apply_curse
+                blocked = not _apply_curse(player, curse, None, log)
+                curse_label = curse.name if not blocked else f"{curse.name} (Immunized: blocked!)"
                 return {
                     "prize_type": "curse",
                     "curse_name": curse.name,
                     "monster_name": chosen_monster.name if chosen_monster else None,
-                    "label": f"Curse: {curse.name}",
+                    "label": f"Curse: {curse_label}",
+                    "blocked": blocked,
                 }
         import copy as _copy
         if C.CURSE_POOL:
             curse = _copy.copy(rng.choice(C.CURSE_POOL))
-            player.curses.append(curse)
-            from . import effects as _fx2
-            _fx2.refresh_tokens(player)
-            log.append(f"  Prize: received curse '{curse.name}'!")
-            return {"prize_type": "curse", "curse_name": curse.name, "label": f"Curse: {curse.name}"}
+            from .encounters import _apply_curse
+            blocked = not _apply_curse(player, curse, None, log)
+            curse_label = curse.name if not blocked else f"{curse.name} (Immunized: blocked!)"
+            return {"prize_type": "curse", "curse_name": curse.name, "label": f"Curse: {curse_label}", "blocked": blocked}
         log.append("  Prize: no curses available — nothing.")
         return {"prize_type": "nothing", "label": "Nothing"}
 

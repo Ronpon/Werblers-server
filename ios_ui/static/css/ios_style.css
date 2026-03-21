@@ -1767,6 +1767,12 @@ button {
   border-radius: 8px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.7);
 }
+.mystery-wheel-img {
+  max-width: 340px;
+  width: 85%;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.7);
+}
 .mystery-speech-bubble {
   background: rgba(255,255,255,0.08);
   border: 1px solid rgba(255,255,255,0.15);

@@ -737,8 +737,15 @@ function openCardZoomWithActions(imgSrc, itemContext) {
   let btns = '';
   if (isMyTurn && itemContext) {
     if (itemContext.type === 'equip') {
-      btns += `<button class="btn-secondary btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('unequip_to_pack',${itemContext.index})">Unequip</button>`;
-      btns += `<button class="btn-danger btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('discard_equip',${itemContext.index})">Drop</button>`;
+      if (itemContext.source) {
+        // Player sheet: source+index directly, no flat-index translation needed
+        btns += `<button class="btn-secondary btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItemDirect('unequip_to_pack','${itemContext.source}',${itemContext.index})">Unequip</button>`;
+        btns += `<button class="btn-danger btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItemDirect('discard_equip','${itemContext.source}',${itemContext.index})">Drop</button>`;
+      } else {
+        // Equip summary panel: uses flat index via _flatEquipToSource
+        btns += `<button class="btn-secondary btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('unequip_to_pack',${itemContext.index})">Unequip</button>`;
+        btns += `<button class="btn-danger btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('discard_equip',${itemContext.index})">Drop</button>`;
+      }
     } else if (itemContext.type === 'pack') {
       btns += `<button class="btn-secondary btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('equip_from_pack',${itemContext.index})">Equip</button>`;
       btns += `<button class="btn-danger btn-sm" onclick="event.stopPropagation();closeCardZoom();_manageItem('discard_pack',${itemContext.index})">Drop</button>`;
@@ -1618,18 +1625,18 @@ function renderPlayerSheetFull(player, placementInfo) {
   const weaponHands = player.weapon_hands || 2;
   const hasChestAccess = (player.chest_slots ?? 1) > 0;
 
-  // Track equip index for manage_item (flat index: helmets, chest, legs, weapons)
-  let _psEquipIdx = 0;
+  // Slot type → manage_item source string mapping
+  const _slotSrcMap = {helmet:'equip_helmet', chest:'equip_chest', legs:'equip_leg', weapon:'equip_weapon'};
 
   function slotHtml(item, label, slotKey, idx) {
     const isTarget = isPlacement && validSlots.includes(slotKey);
     if (item) {
       const img = item.card_image ? `/images/${item.card_image}` : '';
       const bonus = item.strength_bonus >= 0 ? `+${item.strength_bonus}` : `${item.strength_bonus}`;
-      const myEquipIdx = _psEquipIdx++;
+      const itemSrc = _slotSrcMap[slotKey] || 'equip_helmet';
       const tapAction = isTarget
         ? `onclick="_placeIntoSlot('${slotKey}',${idx})"`
-        : (img ? `onclick="openCardZoomWithActions('${img}',{type:'equip',index:${myEquipIdx},name:'${_esc(item.name)}'})"` : '');
+        : (img ? `onclick="openCardZoomWithActions('${img}',{type:'equip',source:'${itemSrc}',index:${idx},name:'${_esc(item.name)}'})"` : '');
       if (img) {
         return `<div class="ps-slot ps-slot-card ps-slot-filled ${isTarget ? 'ps-slot-placement-target' : ''}" ${tapAction}>
           <img class="ps-slot-card-img" src="${img}" alt="${item.name}">
@@ -1638,7 +1645,7 @@ function renderPlayerSheetFull(player, placementInfo) {
       return `<div class="ps-slot ps-slot-filled ${isTarget ? 'ps-slot-placement-target' : ''}" ${tapAction}>
         <div class="ps-slot-label">${label}</div><div class="ps-slot-divider"></div><div class="ps-slot-name">${item.name}</div><div class="ps-slot-sub">${bonus}</div></div>`;
     } else {
-      // Empty slot — still count index placeholder (not used)
+      // Empty slot
     }
     if (isTarget) {
       return `<div class="ps-slot ps-slot-empty ps-slot-placement-target" onclick="_placeIntoSlot('${slotKey}',${idx})">
@@ -1769,9 +1776,9 @@ function renderPlayerSheetFull(player, placementInfo) {
 
   // Movement piles
   html += '<div class="ps-section-title">Movement</div><div class="ps-mv-section">';
-  html += `<div class="ps-mv-pile" onclick="openDeckViewer('deck')"><div class="ps-mv-pile-label">Deck (${(player.movement_deck_cards||[]).length})</div><img class="ps-mv-pile-img" src="/images/Movement/Movement Card Back.png"></div>`;
+  html += `<div class="ps-mv-pile" onclick="openDeckViewer('deck')"><div class="ps-mv-pile-label">Deck (${(player.movement_deck_cards||[]).length})</div><img class="ps-mv-pile-img" src="/images/Cards/Movement Card Back.png"></div>`;
   const _discardTop = player.movement_discard_top;
-  const _discardImg = _discardTop ? `/images/Movement/Movement Card ${Math.min(Math.max(_discardTop,1),5)}.png` : '/images/Movement/Movement Card Back.png';
+  const _discardImg = _discardTop ? `/images/Movement/Movement Card ${Math.min(Math.max(_discardTop,1),5)}.png` : '/images/Cards/Movement Card Back.png';
   const _discardOpacity = _discardTop ? '1' : '0.5';
   html += `<div class="ps-mv-pile" onclick="openDeckViewer('discard')"><div class="ps-mv-pile-label">Discard (${(player.movement_discard_list||[]).length})</div><img class="ps-mv-pile-img" src="${_discardImg}" style="opacity:${_discardOpacity}"></div>`;
   html += '</div>';
@@ -1967,7 +1974,7 @@ async function usePackConsumable(idx) {
   document.body.appendChild(overlay);
   overlay.querySelector('#confirm-use-cons').onclick = async () => {
     overlay.remove();
-    const resp = await fetch('/api/use_pack_consumable', {
+    const resp = await fetch('/api/use_consumable', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({consumable_index: idx}),
@@ -1975,6 +1982,11 @@ async function usePackConsumable(idx) {
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }
     if (data.state) { gameState = data.state; applyState(data.state); }
+    // Handle trait_gained response (e.g. Nectar of the Gods)
+    if (data.phase === 'trait_gained') {
+      await _placePendingTraitItems();
+      await _placePendingTraitMinions();
+    }
     await loadAndRenderAbilities();
   };
   overlay.querySelector('#cancel-use-cons').onclick = () => overlay.remove();
@@ -2075,7 +2087,7 @@ function _mysteryBoxBack() {
 function _renderTheWheel(event) {
   const tier = event.tier || 1;
   return `<div class="mystery-speech-bubble"><p>"Step right up! Spin the wheel!"</p></div>
-    <img class="mystery-fs-img" src="/images/Events/Wheel Tier ${tier}.png" alt="The Wheel" onerror="this.style.display='none'">
+    <img class="mystery-wheel-img" src="/images/Events/Wheel Tier ${tier}.png" alt="The Wheel" onerror="this.style.display='none'">
     <div class="mystery-btn-row">
       <button class="btn-primary" onclick="_resolveMysteryWheel()">Spin</button>
       <button class="btn-secondary" onclick="_wheelDecline()">Decline</button>
@@ -2716,6 +2728,10 @@ function _flatEquipToSource(flatIdx) {
 }
 
 async function _manageItem(action, index) {
+  if (action === 'equip_from_pack') {
+    await _equipFromPack(index);
+    return;
+  }
   let body = {};
   if (action === 'discard_equip') {
     const src = _flatEquipToSource(index);
@@ -2725,8 +2741,6 @@ async function _manageItem(action, index) {
     const src = _flatEquipToSource(index);
     if (!src) { alert('Item not found'); return; }
     body = {action: 'to_pack', source: src.source, index: src.index};
-  } else if (action === 'equip_from_pack') {
-    body = {action: 'to_equip', source: 'pack', index: index};
   } else if (action === 'discard_pack') {
     body = {action: 'discard', source: 'pack', index: index};
   } else {
@@ -2747,6 +2761,184 @@ async function _manageItem(action, index) {
     alert(data.error);
     return;
   }
+  if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+// Direct equip/unequip/discard using source+index (bypasses flat index mapping)
+async function _manageItemDirect(action, source, index) {
+  let apiAction;
+  if (action === 'discard_equip') apiAction = 'discard';
+  else if (action === 'unequip_to_pack') apiAction = 'to_pack';
+  else { alert('Unknown action: ' + action); return; }
+  const resp = await fetch('/api/manage_item', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: apiAction, source, index}),
+  });
+  const data = await resp.json();
+  if (data.error) {
+    if (data.error === 'pack_full') { _showPackFullNotice(); return; }
+    alert(data.error);
+    return;
+  }
+  if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+// Equip an item from pack using the full displacement chain
+async function _equipFromPack(packIndex) {
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pack_index: packIndex}),
+  });
+  const data = await resp.json();
+  if (!data.error) {
+    if (data.state) { gameState = data.state; applyState(data.state); }
+    return;
+  }
+  if (data.error === 'multi_displace' && data.displaced_items) {
+    await _showIOSMultiDisplace(packIndex, data.displaced_items, data.pack_slots_free);
+    return;
+  }
+  if (data.error && data.error.includes('no free slot')) {
+    const p = gameState?.players?.find(pl => pl.is_current);
+    const item = p?.pack?.[packIndex];
+    if (item) {
+      const slotMap = {helmet: p.helmets, chest: p.chest_armor, legs: p.leg_armor, weapon: p.weapons};
+      const occupied = slotMap[item.slot] || [];
+      const equippedItem = occupied[0] || null;
+      await _showIOSOccupiedSlot(packIndex, item, equippedItem, p.pack_slots_free || 0);
+      return;
+    }
+  }
+  alert(data.error);
+}
+
+function _showIOSOccupiedSlot(packIndex, newItem, equippedItem, packSlotsFree) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'action-sheet-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(); } };
+    const sheet = document.createElement('div');
+    sheet.className = 'action-sheet';
+    const newImg = newItem?.card_image ? `<img src="/images/${newItem.card_image}" style="width:80px;border-radius:6px;margin:4px auto;display:block" onerror="this.style.display='none'">` : '';
+    const curImg = equippedItem?.card_image ? `<img src="/images/${equippedItem.card_image}" style="width:80px;border-radius:6px;margin:4px auto;display:block" onerror="this.style.display='none'">` : '';
+    sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Slot Occupied</div>
+      <div style="display:flex;gap:16px;justify-content:center;padding:8px 16px">
+        <div style="text-align:center;flex:1"><div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Equipping</div>${newImg}<div style="font-size:12px;color:var(--text)">${newItem?.name||''}</div></div>
+        <div style="align-self:center;font-size:20px;color:var(--gold)">⇌</div>
+        <div style="text-align:center;flex:1"><div style="font-size:11px;color:var(--text-dim);margin-bottom:4px">Replaces</div>${curImg}<div style="font-size:12px;color:var(--text)">${equippedItem?.name||'?'}</div></div>
+      </div>
+      <div class="action-sheet-item" id="_occ-pack-btn">${packSlotsFree > 0 ? 'Move Replaced to Pack' : 'Move Replaced to Pack (Pack Full — Choose Discard)'}</div>
+      <div class="action-sheet-item danger" id="_occ-discard-btn">Discard Replaced &amp; Equip</div>
+      <div class="action-sheet-cancel" id="_occ-cancel">Cancel</div>`;
+    sheet.querySelector('#_occ-pack-btn').onclick = async () => {
+      overlay.remove();
+      await _doEquipWithDisplace(packIndex, true, false);
+      resolve();
+    };
+    sheet.querySelector('#_occ-discard-btn').onclick = async () => {
+      overlay.remove();
+      await _doEquipWithDisplace(packIndex, false, true);
+      resolve();
+    };
+    sheet.querySelector('#_occ-cancel').onclick = () => { overlay.remove(); resolve(); };
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+  });
+}
+
+async function _doEquipWithDisplace(packIndex, toPackFirst, forceDiscard) {
+  const body = {pack_index: packIndex, force: true, to_pack: toPackFirst && !forceDiscard};
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+  if (data.error === 'pack_full' && data.pack) {
+    await _showEquipPackDiscardPicker(data.pack, packIndex);
+    return;
+  }
+  if (data.error === 'multi_displace' && data.displaced_items) {
+    await _showIOSMultiDisplace(packIndex, data.displaced_items, data.pack_slots_free);
+    return;
+  }
+  if (data.error) { alert(data.error); return; }
+  if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+function _showEquipPackDiscardPicker(packItems, origPackIndex) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'action-sheet-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(); } };
+    const sheet = document.createElement('div');
+    sheet.className = 'action-sheet';
+    sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Pack Full</div>
+      <div style="font-size:12px;color:var(--text-dim);text-align:center;padding:4px 8px 8px">Choose a pack item to discard to make room:</div>` +
+      packItems.map((item, i) => {
+        const img = item.card_image ? `<img src="/images/${item.card_image}" style="width:36px;border-radius:4px;vertical-align:middle;margin-right:8px" onerror="this.style.display='none'">` : '';
+        return `<div class="action-sheet-item" data-dpi="${i}">${img}${item.name}</div>`;
+      }).join('') +
+      `<div class="action-sheet-cancel">Cancel</div>`;
+    sheet.querySelectorAll('[data-dpi]').forEach(el => {
+      el.onclick = async () => {
+        overlay.remove();
+        const dpi = parseInt(el.dataset.dpi);
+        const resp = await fetch('/api/equip_from_pack', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({pack_index: origPackIndex, force: true, to_pack: true, discard_pack_index: dpi}),
+        });
+        const data = await resp.json();
+        if (data.error) { alert(data.error); }
+        else if (data.state) { gameState = data.state; applyState(data.state); }
+        resolve();
+      };
+    });
+    sheet.querySelector('.action-sheet-cancel').onclick = () => { overlay.remove(); resolve(); };
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+  });
+}
+
+async function _showIOSMultiDisplace(packIndex, displacedItems, packSlotsFree) {
+  const actions = [];
+  let slotsAvailable = packSlotsFree;
+  for (let i = 0; i < displacedItems.length; i++) {
+    const item = displacedItems[i];
+    const result = await new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.className = 'action-sheet-overlay';
+      overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+      const sheet = document.createElement('div');
+      sheet.className = 'action-sheet';
+      const img = item.card_image ? `<img src="/images/${item.card_image}" style="width:80px;border-radius:6px;margin:6px auto;display:block" onerror="this.style.display='none'">` : '';
+      const canPack = slotsAvailable > 0;
+      sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Displaced Item ${i+1}/${displacedItems.length}</div>
+        <div style="font-size:12px;color:var(--text);text-align:center;padding:4px">${item.name} (+${item.strength_bonus} Str) must be removed.</div>
+        ${img}
+        ${canPack ? `<div class="action-sheet-item" id="_md-pack">Move to Pack</div>` : ''}
+        <div class="action-sheet-item danger" id="_md-discard">Discard</div>
+        <div class="action-sheet-cancel" id="_md-cancel">Cancel</div>`;
+      if (canPack) sheet.querySelector('#_md-pack').onclick = () => { overlay.remove(); resolve({action: 'to_pack'}); };
+      sheet.querySelector('#_md-discard').onclick = () => { overlay.remove(); resolve({action: 'discard'}); };
+      sheet.querySelector('#_md-cancel').onclick = () => { overlay.remove(); resolve(null); };
+      overlay.appendChild(sheet);
+      document.body.appendChild(overlay);
+    });
+    if (result === null) return;
+    actions.push(result);
+    if (result.action === 'to_pack') slotsAvailable--;
+  }
+  const resp = await fetch('/api/equip_from_pack', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({pack_index: packIndex, force: true, displaced_actions: actions}),
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
   if (data.state) { gameState = data.state; applyState(data.state); }
 }
 
