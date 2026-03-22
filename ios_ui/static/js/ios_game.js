@@ -2906,31 +2906,47 @@ function _showEquipPackDiscardPicker(packItems, origPackIndex) {
 async function _showIOSMultiDisplace(packIndex, displacedItems, packSlotsFree) {
   const actions = [];
   let slotsAvailable = packSlotsFree;
+  const p = gameState?.players?.find(pl => pl.is_current);
   for (let i = 0; i < displacedItems.length; i++) {
     const item = displacedItems[i];
-    const result = await new Promise(resolve => {
+    // Ask what to do with this displaced weapon
+    const choice = await new Promise(resolve => {
       const overlay = document.createElement('div');
       overlay.className = 'action-sheet-overlay';
       overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
       const sheet = document.createElement('div');
       sheet.className = 'action-sheet';
       const img = item.card_image ? `<img src="/images/${item.card_image}" style="width:80px;border-radius:6px;margin:6px auto;display:block" onerror="this.style.display='none'">` : '';
-      const canPack = slotsAvailable > 0;
-      sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Displaced Item ${i+1}/${displacedItems.length}</div>
+      const packHint = slotsAvailable <= 0 ? ' (choose item to drop)' : '';
+      sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Replaced Weapon ${i+1}/${displacedItems.length}</div>
         <div style="font-size:12px;color:var(--text);text-align:center;padding:4px">${item.name} (+${item.strength_bonus} Str) must be removed.</div>
         ${img}
-        ${canPack ? `<div class="action-sheet-item" id="_md-pack">Move to Pack</div>` : ''}
+        <div class="action-sheet-item" id="_md-pack">Move to Pack${packHint}</div>
         <div class="action-sheet-item danger" id="_md-discard">Discard</div>
         <div class="action-sheet-cancel" id="_md-cancel">Cancel</div>`;
-      if (canPack) sheet.querySelector('#_md-pack').onclick = () => { overlay.remove(); resolve({action: 'to_pack'}); };
-      sheet.querySelector('#_md-discard').onclick = () => { overlay.remove(); resolve({action: 'discard'}); };
+      sheet.querySelector('#_md-pack').onclick = () => { overlay.remove(); resolve('pack'); };
+      sheet.querySelector('#_md-discard').onclick = () => { overlay.remove(); resolve('discard'); };
       sheet.querySelector('#_md-cancel').onclick = () => { overlay.remove(); resolve(null); };
       overlay.appendChild(sheet);
       document.body.appendChild(overlay);
     });
-    if (result === null) return;
-    actions.push(result);
-    if (result.action === 'to_pack') slotsAvailable--;
+    if (choice === null) return;
+    if (choice === 'discard') {
+      actions.push({action: 'discard'});
+    } else {
+      if (slotsAvailable > 0) {
+        // Free pack slot available — just move it
+        actions.push({action: 'to_pack'});
+        slotsAvailable--;
+      } else {
+        // Pack is full — prompt to choose a pack item to drop first
+        const packItems = p?.pack || [];
+        const pickedIdx = await _pickPackItemToDiscard(packItems, item.name, i + 1, displacedItems.length);
+        if (pickedIdx === null) return; // cancelled
+        actions.push({action: 'to_pack', discard_pack_index: pickedIdx});
+        // net slots unchanged (one evicted, one added)
+      }
+    }
   }
   const resp = await fetch('/api/equip_from_pack', {
     method: 'POST',
@@ -2940,6 +2956,30 @@ async function _showIOSMultiDisplace(packIndex, displacedItems, packSlotsFree) {
   const data = await resp.json();
   if (data.error) { alert(data.error); return; }
   if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+// Show a picker to choose which pack item to discard, returns chosen index or null
+function _pickPackItemToDiscard(packItems, displacedName, itemNum, totalItems) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'action-sheet-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+    const sheet = document.createElement('div');
+    sheet.className = 'action-sheet';
+    sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Pack Full (${itemNum}/${totalItems})</div>
+      <div style="font-size:12px;color:var(--text-dim);text-align:center;padding:4px 8px 8px">Drop a pack item to keep <strong>${displacedName}</strong>:</div>` +
+      packItems.map((itm, idx) => {
+        const img = itm.card_image ? `<img src="/images/${itm.card_image}" style="width:36px;border-radius:4px;vertical-align:middle;margin-right:8px" onerror="this.style.display='none'">` : '';
+        return `<div class="action-sheet-item" data-pi="${idx}">${img}${itm.name}</div>`;
+      }).join('') +
+      `<div class="action-sheet-cancel">Cancel</div>`;
+    sheet.querySelectorAll('[data-pi]').forEach(el => {
+      el.onclick = () => { overlay.remove(); resolve(parseInt(el.dataset.pi)); };
+    });
+    sheet.querySelector('.action-sheet-cancel').onclick = () => { overlay.remove(); resolve(null); };
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+  });
 }
 
 function _showPackFullNotice() {

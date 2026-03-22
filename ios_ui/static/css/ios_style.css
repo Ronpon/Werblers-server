@@ -566,6 +566,7 @@ button {
   padding: 4px 0;
   border-bottom: 1px solid rgba(58,50,40,0.4);
   font-size: 14px;
+  cursor: pointer;
 }
 .equip-row:last-child { border-bottom: none; }
 .equip-slot-label {
@@ -892,6 +893,7 @@ button {
 .ps-slot-filled {
   border: 2px solid var(--gold);
   background: var(--surface2);
+  cursor: pointer;
 }
 .ps-slot-disabled {
   border: 2px dashed rgba(200,60,60,0.45);
@@ -936,6 +938,7 @@ button {
   text-shadow: 0 1px 3px #000, 0 0 6px #000;
   z-index: 2;
   color: rgba(255,255,255,0.8);
+  pointer-events: none;
 }
 .ps-slot-label {
   font-family: 'Cinzel', serif;
