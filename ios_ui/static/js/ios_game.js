@@ -323,6 +323,7 @@ function _playerStrBreakdown(p) {
   for (const t of (p.traits || [])) { if (t.tokens) lines.push(`${t.name}: +${t.tokens}`); if (t.strength_bonus) lines.push(`${t.name}: +${t.strength_bonus}`); }
   for (const m of (p.minions || [])) { if (m.strength_bonus) lines.push(`${m.name}: +${m.strength_bonus}`); }
   for (const c of (p.curses || [])) { if (c.tokens) lines.push(`${c.name}: ${c.tokens >= 0 ? '+' : ''}${c.tokens}`); }
+  for (const l of (p.ability_breakdown || [])) { lines.push(l); }
   lines.push(`Total: ${p.strength}`);
   return lines;
 }
@@ -2834,7 +2835,9 @@ function _showIOSOccupiedSlot(packIndex, newItem, equippedItem, packSlotsFree) {
       <div class="action-sheet-cancel" id="_occ-cancel">Cancel</div>`;
     sheet.querySelector('#_occ-pack-btn').onclick = async () => {
       overlay.remove();
-      await _doEquipWithDisplace(packIndex, true, false);
+      const slotIdx = await _pickPackInsertSlot(packIndex, equippedItem?.name || 'item');
+      if (slotIdx === null) { resolve(); return; }
+      await _doEquipWithDisplace(packIndex, true, false, slotIdx);
       resolve();
     };
     sheet.querySelector('#_occ-discard-btn').onclick = async () => {
@@ -2848,8 +2851,9 @@ function _showIOSOccupiedSlot(packIndex, newItem, equippedItem, packSlotsFree) {
   });
 }
 
-async function _doEquipWithDisplace(packIndex, toPackFirst, forceDiscard) {
+async function _doEquipWithDisplace(packIndex, toPackFirst, forceDiscard, toPackIndex) {
   const body = {pack_index: packIndex, force: true, to_pack: toPackFirst && !forceDiscard};
+  if (toPackFirst && !forceDiscard && toPackIndex !== undefined) body.to_pack_index = toPackIndex;
   const resp = await fetch('/api/equip_from_pack', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -2866,6 +2870,49 @@ async function _doEquipWithDisplace(packIndex, toPackFirst, forceDiscard) {
   }
   if (data.error) { alert(data.error); return; }
   if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+// Show pack slot chooser so player can pick WHERE to put a displaced item.
+// equippingPackIndex: index of the item being equipped (will leave pack).
+// itemName: display name of the displaced item being placed.
+// Returns chosen insert index (0-based in the post-removal array), or null if cancelled.
+function _pickPackInsertSlot(equippingPackIndex, itemName) {
+  return new Promise(resolve => {
+    const p = gameState?.players?.find(pl => pl.is_current);
+    if (!p) { resolve(0); return; }
+    // Pack after the equipping item leaves
+    const packItems = (p.pack || []).filter((_, i) => i !== equippingPackIndex);
+    const packSize = p.pack_size || 5;
+    const overlay = document.createElement('div');
+    overlay.className = 'action-sheet-overlay';
+    overlay.onclick = (e) => { if (e.target === overlay) { overlay.remove(); resolve(null); } };
+    const sheet = document.createElement('div');
+    sheet.className = 'action-sheet';
+    let slotsHtml = '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;padding:8px 4px">';
+    // Show filled slots then empty slots (up to packSize, displaced takes one)
+    const totalDisplaySlots = Math.min(packSize, packItems.length + 1);
+    for (let i = 0; i < totalDisplaySlots; i++) {
+      if (i < packItems.length) {
+        const itm = packItems[i];
+        const imgTag = itm.card_image ? `<img src="/images/${itm.card_image}" style="width:100%;height:100%;object-fit:cover;border-radius:4px">` : '';
+        const label = (itm.name || '').substring(0, 12);
+        slotsHtml += `<div data-slot="${i}" style="width:60px;height:84px;border:2px solid var(--gold);border-radius:6px;overflow:hidden;cursor:pointer;position:relative;flex-shrink:0">${imgTag}<div style="position:absolute;bottom:0;left:0;right:0;font-size:8px;text-align:center;background:rgba(0,0,0,0.75);color:var(--gold);padding:2px;line-height:1.2">${label}</div></div>`;
+      } else {
+        slotsHtml += `<div data-slot="${i}" style="width:60px;height:84px;border:2px dashed var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0"><span style="font-size:10px;color:var(--text-dim)">Empty</span></div>`;
+      }
+    }
+    slotsHtml += '</div>';
+    sheet.innerHTML = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Choose Pack Slot</div>
+      <div style="font-size:12px;color:var(--text-dim);text-align:center;padding:0 8px 4px">Where to place <strong style="color:var(--text)">${itemName}</strong>:</div>
+      ${slotsHtml}
+      <div class="action-sheet-cancel">Cancel</div>`;
+    sheet.querySelectorAll('[data-slot]').forEach(el => {
+      el.onclick = () => { overlay.remove(); resolve(parseInt(el.dataset.slot)); };
+    });
+    sheet.querySelector('.action-sheet-cancel').onclick = () => { overlay.remove(); resolve(null); };
+    overlay.appendChild(sheet);
+    document.body.appendChild(overlay);
+  });
 }
 
 function _showEquipPackDiscardPicker(packItems, origPackIndex) {

@@ -544,6 +544,7 @@ def api_equip_from_pack():
     force   = bool(data.get("force",   False))
     to_pack = bool(data.get("to_pack", False))
     discard_pack_index = int(data.get("discard_pack_index", -1))
+    to_pack_index = int(data.get("to_pack_index", -1))
     equip_displaced = bool(data.get("equip_displaced", False))
     displaced_actions = data.get("displaced_actions", None)
     player = _game.current_player
@@ -639,7 +640,8 @@ def api_equip_from_pack():
                     except ValueError:
                         pi = pack_index
                     player.pack.pop(pi)
-                    player.pack.insert(min(pi, len(player.pack)), displaced)
+                    insert_pos = to_pack_index if (to_pack_index >= 0 and to_pack_index <= len(player.pack)) else min(pi, len(player.pack))
+                    player.pack.insert(insert_pos, displaced)
                     player.equip(item)
                     if equip_displaced and evicted_pack_item is not None:
                         if player.can_equip(evicted_pack_item):
@@ -1506,23 +1508,28 @@ def _enrich_combat_info(info: dict) -> dict:
         info["player_weapon_hands"] = player.weapon_hands
         info.setdefault("prefight_str_bonus", _game._prefight_str_bonus)
         # Add hero passive ability bonuses to ability_breakdown for hover tooltip
-        _hero_breakdown = list(info.get("ability_breakdown") or [])
-        hero = player.hero
-        is_night = _game.is_night
-        if hero:
-            if hero.has_luscious_locks and not player.helmets:
-                _hero_breakdown.insert(0, "Luscious Locks (no helmet): +5")
-            if hero.has_skimpy_armour and player.chest_armor:
-                # Skimpy armour: each chest piece contributes min 8
-                for item in player.chest_armor:
-                    skimpy_bonus = max(0, 8 - item.strength_bonus)
-                    if skimpy_bonus > 0:
-                        _hero_breakdown.insert(0, f"Skimpy Armour ({item.name}): +{skimpy_bonus} extra")
-            if hero.has_night_stalker and is_night:
-                _hero_breakdown.insert(0, f"Night Stalker (night): +{hero.night_stalker_bonus}")
+        _hero_breakdown = list(info.get("ability_breakdown") or []) + _hero_ability_breakdown(player, _game.is_night)
         if _hero_breakdown:
             info["ability_breakdown"] = _hero_breakdown
     return info
+
+def _hero_ability_breakdown(player, is_night: bool) -> list:
+    """Return a list of human-readable strings for hero passive ability bonuses."""
+    lines = []
+    hero = player.hero
+    if not hero:
+        return lines
+    if hero.has_luscious_locks and not player.helmets:
+        lines.append("Luscious Locks (no helmet): +5")
+    if hero.has_skimpy_armour and player.chest_armor:
+        for item in player.chest_armor:
+            skimpy_bonus = max(0, 8 - item.strength_bonus)
+            if skimpy_bonus > 0:
+                lines.append(f"Skimpy Armour ({item.name}): +{skimpy_bonus} extra")
+    if hero.has_night_stalker and is_night:
+        lines.append(f"Night Stalker (night): +{hero.night_stalker_bonus}")
+    return lines
+
 def _ser_item(item) -> dict:
     if item.slot.value == "consumable":
         card_img = _consumable_card_image(item.name)
@@ -1606,6 +1613,7 @@ def _build_state() -> dict:
             "max_minions":           p.MAX_MINIONS,
             "beggar_gifts":          getattr(p, "_beggar_gifts", 0),
             "beggar_completed":      getattr(p, "_beggar_completed", False),
+            "ability_breakdown":     _hero_ability_breakdown(p, g.is_night),
         })
     return {
         "turn_number":       g.turn_number,
