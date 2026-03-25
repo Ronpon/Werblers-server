@@ -18,8 +18,10 @@ let _musicEl = null;
 let _musicVol = 0.5;
 let _sfxVol = 0.5;
 let _pendingOfferData = null;
+let _pendingOfferType = null; // 'chest' or 'shop'
 let _pendingPlacement = null;
 let _pendingCombatInfo = null;
+let _crossroadsSelectedSources = []; // tracks selected discard items for Crossroads Demon
 
 // ================================================================
 // INITIALIZATION
@@ -275,7 +277,9 @@ function updateBoard() {
     const tileEl = _tileEls[pos];
     if (!tileEl) continue;
     const tokenArea = tileEl.querySelector('.tile-tokens');
-    for (const p of players) {
+    // Sort so the current player's token is appended last (renders on top)
+    const sortedPlayers = [...players].sort((a, b) => a.is_current ? 1 : b.is_current ? -1 : 0);
+    for (const p of sortedPlayers) {
       if (!p.token_image) continue;
       const img = document.createElement('img');
       img.className = 'tile-token' + (p.is_current ? ' current-player-token' : '');
@@ -359,7 +363,7 @@ function updateEquipSummary() {
       const bonus = item.strength_bonus >= 0 ? `+${item.strength_bonus}` : `${item.strength_bonus}`;
       const img = item.card_image ? `/images/${item.card_image}` : '';
       const thumb = img ? `<img class="equip-item-thumb" src="${img}">` : '';
-      const ctx = img ? `onclick="openCardZoomWithActions('${img}',{type:'equip',index:${myIdx},name:'${_esc(item.name)}'})"`  : '';
+      const ctx = img ? `onclick="openCardZoomWithActions('${_esc(img)}',{type:'equip',index:${myIdx},name:'${_esc(item.name)}'})"`  : '';
       return `<div class="equip-row" ${ctx}>${thumb}<span class="equip-slot-label">${label}</span><span class="equip-item-name">${item.name}</span><span class="equip-item-bonus">${bonus}</span></div>`;
     }).join('');
   }
@@ -381,17 +385,20 @@ function updateEquipSummary() {
   for (let i = 0; i < packEquip.length; i++) {
     const item = packEquip[i];
     const img = item.card_image ? `/images/${item.card_image}` : '';
-    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${img}',{type:'pack',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${_esc(img)}',{type:'pack',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    else html += `<div class="pack-thumb pack-thumb-text" onclick="openCardZoomWithActions('',{type:'pack',index:${i},name:'${_esc(item.name)}'})" title="${item.name}">${item.name}</div>`;
   }
   for (let i = 0; i < consumables.length; i++) {
     const item = consumables[i];
     const img = item.card_image ? `/images/${item.card_image}` : '';
-    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${img}',{type:'consumable',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${_esc(img)}',{type:'consumable',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    else html += `<div class="pack-thumb pack-thumb-text" onclick="openCardZoomWithActions('',{type:'consumable',index:${i},name:'${_esc(item.name)}'})" title="${item.name}">${item.name}</div>`;
   }
   for (let i = 0; i < captured.length; i++) {
     const item = captured[i];
     const img = item.card_image ? `/images/${item.card_image}` : '';
-    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${img}',{type:'minion',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    if (img) html += `<img class="pack-thumb" src="${img}" onclick="openCardZoomWithActions('${_esc(img)}',{type:'minion',index:${i},name:'${_esc(item.name)}'})" alt="${item.name}">`;
+    else html += `<div class="pack-thumb pack-thumb-text" onclick="openCardZoomWithActions('',{type:'minion',index:${i},name:'${_esc(item.name)}'})" title="${item.name}">${item.name}</div>`;
   }
   // Empty pack slots
   const emptySlots = Math.max(0, packSize - allPack.length);
@@ -406,7 +413,8 @@ function updateEquipSummary() {
   if (traits.length || curses.length) {
     html += '<div class="equip-summary-title" style="margin-top:10px">Traits & Curses</div>';
     for (const t of traits) {
-      const tokBadge = t.tokens > 0 ? ` <span class="tc-token-badge"><img src="/images/Assorted UI Images/+1 Token.png" style="height:14px;vertical-align:middle;margin-right:2px" onerror="this.style.display='none'">${t.tokens}</span>` : '';
+      const tokCount = t.effect_id === 'residuals' ? (t.strength_bonus || 0) : t.tokens;
+      const tokBadge = tokCount > 0 ? ` <span class="tc-token-badge"><img src="/images/Assorted UI Images/+1 Token.png" style="height:14px;vertical-align:middle;margin-right:2px" onerror="this.style.display='none'">${tokCount}</span>` : '';
       html += `<div class="equip-row" onclick="showTcTooltip('${_esc(t.name)}','${_esc(t.description || '')}',this)"><span style="color:var(--trait)">✦ ${t.name}</span>${tokBadge}</div>`;
     }
     for (const c of curses) {
@@ -564,6 +572,7 @@ let _invOnConfirm = null;
 let _invPlacementItem = null;
 
 function showChestModal(offer, data) {
+  _pendingOfferType = 'chest';
   const modal = document.getElementById('offer-modal');
   const content = document.getElementById('offer-content');
   const item = offer.items[0];
@@ -598,6 +607,7 @@ let _shopSelectedIndex = -1;
 
 function showShopModal(offer, data) {
   _shopSelectedIndex = -1;
+  _pendingOfferType = 'shop';
   const modal = document.getElementById('offer-modal');
   const content = document.getElementById('offer-content');
   const items = offer.items || [];
@@ -702,6 +712,16 @@ function _finishPlacement(choices) {
   if (cb) cb(choices);
 }
 
+function _cancelPlacement() {
+  _invPlacementItem = null;
+  _invOnConfirm = null;
+  document.getElementById('player-sheet-overlay').classList.add('hidden');
+  // Re-show the offer modal (it was hidden but content is still intact)
+  if (_pendingOfferData) {
+    document.getElementById('offer-modal').classList.remove('hidden');
+  }
+}
+
 // During pack-full placement: confirm discard of an existing item to make room
 function _confirmPackReplace(unifiedIndex, itemName) {
   const overlay = document.createElement('div');
@@ -758,7 +778,8 @@ function openCardZoomWithActions(imgSrc, itemContext) {
     }
   }
   btns += `<button class="btn-secondary btn-sm" onclick="event.stopPropagation();closeCardZoom()">Back</button>`;
-  modal.innerHTML = `<div class="card-zoom-inner"><img src="${imgSrc}" alt="Card"><div class="card-zoom-actions">${btns}</div></div>`;
+  const imgHtml = imgSrc ? `<img src="${imgSrc}" alt="Card">` : (itemContext?.name ? `<div class="card-zoom-placeholder">${itemContext.name}</div>` : '');
+  modal.innerHTML = `<div class="card-zoom-inner">${imgHtml}<div class="card-zoom-actions">${btns}</div></div>`;
   modal.classList.remove('hidden');
 }
 function closeCardZoom() {
@@ -772,18 +793,42 @@ function _useConsumableFromZoom(idx) {
   const c = (p.consumables || [])[idx];
   if (!c) return;
   // Check if combat-only
-  const overworldAllowed = ['priests_blessing','many_priests_blessings','nectar_of_the_gods',
-    'h_bomb','s_bomb','n_bomb','give_curse','capture_monster_1','capture_monster_2','capture_monster_3'];
   const isOverworld = c.use_context === 'overworld' || c.use_context === 'both';
   const nameLC = (c.name || '').toLowerCase();
-  const isBomb = nameLC.includes('bomb');
+  const isBomb = nameLC.includes('bomb') || c.effect_id === 'give_curse';
   const isBlessing = nameLC.includes('priest');
   const isNectar = nameLC.includes('nectar');
   if (!isOverworld && !isBomb && !isBlessing && !isNectar) {
     _showCombatOnlyNotice(c.name);
     return;
   }
+  // Bombs: show player selection first (outside combat only)
+  if (isBomb && !_game?._pendingCombat) {
+    const others = (gameState?.players || []).filter(x => x.player_id !== p.player_id);
+    if (others.length > 0) { _selectBombTarget(idx, c); return; }
+  }
   usePackConsumable(idx);
+}
+
+function _selectBombTarget(idx, c) {
+  const others = (gameState?.players || []).filter(x => x.player_id !== (gameState?.players?.find(q => q.is_current)?.player_id));
+  const overlay = document.createElement('div');
+  overlay.className = 'action-sheet-overlay';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  const sheet = document.createElement('div');
+  sheet.className = 'action-sheet';
+  let html = `<div style="text-align:center;padding:8px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:16px">${c.name}</div>`
+    + `<div class="action-sheet-item" style="color:var(--text-dim);font-style:italic;pointer-events:none">Who do you want to curse?</div>`;
+  for (const target of others) {
+    html += `<div class="action-sheet-item" data-target-id="${target.player_id}">${target.hero_name || target.name}</div>`;
+  }
+  html += `<div class="action-sheet-cancel" onclick="this.closest('.action-sheet-overlay').remove()">Cancel</div>`;
+  sheet.innerHTML = html;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+  sheet.querySelectorAll('[data-target-id]').forEach(el => {
+    el.onclick = () => { overlay.remove(); usePackConsumable(idx, parseInt(el.dataset.targetId)); };
+  });
 }
 
 function _showCombatOnlyNotice(name) {
@@ -982,6 +1027,8 @@ function skipBystander() {
 }
 
 function _renderPreFight(combat, state) {
+  const isNewEncounter = !_pendingCombatInfo || _pendingCombatInfo.monster_name !== combat.monster_name;
+  if (isNewEncounter) _crossroadsSelectedSources = [];
   _pendingCombatInfo = combat;
   const overlay = document.getElementById('battle-overlay');
   const p = state.players.find(x => x.player_id === combat.player_id) || state.players.find(x => x.is_current) || state.players[0];
@@ -1031,6 +1078,42 @@ function _renderPreFight(combat, state) {
     fleeHtml = `<button class="btn-flee-swiftness" onclick="swiftnessFlee()">Flee (Swiftness)</button>`;
   }
 
+  // Crossroads Demon — Fair Exchange section
+  let crossroadsHtml = '';
+  if (combat.effect_id === 'crossroads_demon') {
+    const allEquipped = [];
+    if (p) {
+      (p.helmets || []).forEach((item, i) => allEquipped.push({item, source: 'equip_helmet', index: i}));
+      (p.chest_armor || []).forEach((item, i) => allEquipped.push({item, source: 'equip_chest', index: i}));
+      (p.leg_armor || []).forEach((item, i) => allEquipped.push({item, source: 'equip_leg', index: i}));
+      (p.weapons || []).forEach((item, i) => allEquipped.push({item, source: 'equip_weapon', index: i}));
+    }
+    const alreadyDiscarded = combat.crossroads_discards_count || 0;
+    if (allEquipped.length > 0) {
+      const itemsHtml = allEquipped.map(({item, source, index}) => {
+        const selKey = `${source}:${index}`;
+        const isSelected = _crossroadsSelectedSources.some(s => s.source === source && s.index === index);
+        const img = item.card_image ? `/images/${item.card_image}` : '';
+        const thumb = img ? `<img class="prefight-consumable-img" src="${img}" style="width:36px;height:auto" onclick="openCardZoom('${_esc(img)}')">` : '';
+        return `<div class="prefight-consumable crossroads-item${isSelected ? ' crossroads-selected' : ''}" id="cditem-${source}-${index}" onclick="toggleCrossroadsItem('${source}',${index})">
+          ${thumb}<div class="prefight-consumable-info"><div class="prefight-consumable-name">${item.name}</div>
+          <div class="prefight-consumable-bonus" style="color:var(--text-dim);font-size:10px">${source.replace('equip_','').replace('_',' ')}</div></div>
+          <span class="crossroads-check">${isSelected ? '✔' : '○'}</span></div>`;
+      }).join('');
+      const selectedCount = _crossroadsSelectedSources.length;
+      const confirmDisabled = selectedCount === 0 ? 'disabled' : '';
+      crossroadsHtml = `<div class="prefight-consumables-section">
+        <div class="prefight-consumables-title" style="color:#e8c55a">⚡ Fair Exchange</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Select equipment to offer. On a win, draw 1 higher-tier item per piece offered.</div>
+        ${alreadyDiscarded > 0 ? `<div style="font-size:11px;color:#e8c55a;margin-bottom:4px">${alreadyDiscarded} item(s) already offered.</div>` : ''}
+        <div class="prefight-consumables-list">${itemsHtml}</div>
+        <button class="btn-secondary" style="margin-top:6px;width:100%" ${confirmDisabled} onclick="_performCrossroadsDiscard()">
+          Offer ${selectedCount > 0 ? selectedCount : ''} Item${selectedCount !== 1 ? 's' : ''}
+        </button>
+      </div>`;
+    }
+  }
+
   // Monster reroll
   let rerollHtml = '';
   if (combat.can_reroll_monster || combat.ill_come_in_again_available) {
@@ -1057,6 +1140,7 @@ function _renderPreFight(combat, state) {
       </div>
       ${gearHtml}
       ${consumHtml}
+      ${crossroadsHtml}
       <div class="battle-actions">
         <button class="btn-primary btn-fight" onclick="doFight()">Fight!</button>
         ${fleeHtml}
@@ -1064,6 +1148,33 @@ function _renderPreFight(combat, state) {
       </div>
     </div>`;
   overlay.classList.remove('hidden');
+}
+
+function toggleCrossroadsItem(source, index) {
+  const existing = _crossroadsSelectedSources.findIndex(s => s.source === source && s.index === index);
+  if (existing >= 0) {
+    _crossroadsSelectedSources.splice(existing, 1);
+  } else {
+    _crossroadsSelectedSources.push({source, index});
+  }
+  // Re-render to update selection state
+  _renderPreFight(_pendingCombatInfo, gameState);
+}
+
+async function _performCrossroadsDiscard() {
+  if (_crossroadsSelectedSources.length === 0) return;
+  const resp = await fetch('/api/crossroads_discard', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({equip_sources: _crossroadsSelectedSources})
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  _crossroadsSelectedSources = [];
+  if (data.state) gameState = data.state;
+  if (data.combat_info) {
+    _renderPreFight(data.combat_info, gameState);
+  }
 }
 
 async function doFight() {
@@ -1144,7 +1255,10 @@ function closeBattleScene() {
   const combat = _pendingCombatInfo || {};
   const br = _lastBattleResult || {};
   const hasGains = (_pendingGains && _pendingGains.length > 0) || _pendingCombatGains;
-  const p = gameState?.players?.find(x => x.is_current) || gameState?.players?.[0];
+  // Use the player who fought (combat.player_id) not the current player (turn may have advanced)
+  const p = (combat.player_id !== undefined
+    ? gameState?.players?.find(x => x.player_id === combat.player_id)
+    : null) || gameState?.players?.find(x => x.is_current) || gameState?.players?.[0];
   const heroId = p?.hero_id;
   const animType = br.won ? 'victory' : br.lost ? 'defeat' : null;
   const animSrc = animType && heroId && heroAnimMap[heroId]?.[animType] ? `/videos/${heroAnimMap[heroId][animType]}` : '';
@@ -1506,7 +1620,7 @@ function _buildBattleGearSection(combat) {
   function eSlot(item, label) {
     if (item) {
       const img = item.card_image ? `/images/${item.card_image}` : '';
-      if (img) return `<div class="battle-equip-slot" onclick="openCardZoom('${img}')"><img src="${img}" alt="${item.name}"></div>`;
+      if (img) return `<div class="battle-equip-slot" onclick="openCardZoom('${_esc(img)}')"><img src="${img}" alt="${item.name}"></div>`;
       return `<div class="battle-equip-slot" style="display:flex;align-items:center;justify-content:center;font-size:7px;text-align:center;padding:2px">${item.name}</div>`;
     }
     return `<div class="battle-equip-slot is-empty"></div>`;
@@ -1637,7 +1751,7 @@ function renderPlayerSheetFull(player, placementInfo) {
       const itemSrc = _slotSrcMap[slotKey] || 'equip_helmet';
       const tapAction = isTarget
         ? `onclick="_placeIntoSlot('${slotKey}',${idx})"`
-        : (img ? `onclick="openCardZoomWithActions('${img}',{type:'equip',source:'${itemSrc}',index:${idx},name:'${_esc(item.name)}'})"` : '');
+        : `onclick="openCardZoomWithActions('${img ? _esc(img) : ''}',{type:'equip',source:'${itemSrc}',index:${idx},name:'${_esc(item.name)}'})"`;
       if (img) {
         return `<div class="ps-slot ps-slot-card ps-slot-filled ${isTarget ? 'ps-slot-placement-target' : ''}" ${tapAction}>
           <img class="ps-slot-card-img" src="${img}" alt="${item.name}">
@@ -1661,6 +1775,7 @@ function renderPlayerSheetFull(player, placementInfo) {
   // Placement banner
   if (isPlacement && itemToPlace) {
     html += `<div id="ps-placement-banner"><span>Place <strong>${itemToPlace.name}</strong></span>
+      <button class="btn-secondary ps-back-btn" onclick="_cancelPlacement()">Back</button>
       <button class="btn-danger ps-discard-btn" onclick="_finishPlacement({discard:true})">Discard</button></div>`;
   }
 
@@ -1712,7 +1827,7 @@ function renderPlayerSheetFull(player, placementInfo) {
     } else if (isPlacement) {
       tapAction = '';
     } else {
-      tapAction = img ? `onclick="openCardZoomWithActions('${img}',{type:'pack',index:${i},name:'${_esc(item.name)}'})"`  : '';
+      tapAction = `onclick="openCardZoomWithActions('${img ? _esc(img) : ''}',{type:'pack',index:${i},name:'${_esc(item.name)}'})"`;
     }
     const replaceClass = (isPackTarget && packIsFull) ? ' ps-slot-placement-target' : '';
     html += `<div class="ps-slot ps-slot-card ps-slot-filled${replaceClass}" ${tapAction}>${img ? `<img class="ps-slot-card-img" src="${img}">` : ''}<div class="ps-slot-label">${item.name}</div></div>`;
@@ -1728,7 +1843,7 @@ function renderPlayerSheetFull(player, placementInfo) {
     } else if (isPlacement) {
       tapAction = '';
     } else {
-      tapAction = img ? `onclick="openCardZoomWithActions('${img}',{type:'consumable',index:${i},name:'${_esc(item.name)}'})"`  : '';
+      tapAction = `onclick="openCardZoomWithActions('${img ? _esc(img) : ''}',{type:'consumable',index:${i},name:'${_esc(item.name)}'})"`;
     }
     const replaceClass = (isPackTarget && packIsFull) ? ' ps-slot-placement-target' : '';
     html += `<div class="ps-slot ps-slot-card ps-slot-filled${replaceClass}" ${tapAction}>${img ? `<img class="ps-slot-card-img" src="${img}">` : ''}<div class="ps-slot-label">${item.name}</div></div>`;
@@ -1744,7 +1859,7 @@ function renderPlayerSheetFull(player, placementInfo) {
     } else if (isPlacement) {
       tapAction = '';
     } else {
-      tapAction = img ? `onclick="openCardZoomWithActions('${img}',{type:'minion',index:${i},name:'${_esc(item.name)}'})"`  : '';
+      tapAction = `onclick="openCardZoomWithActions('${img ? _esc(img) : ''}',{type:'minion',index:${i},name:'${_esc(item.name)}'})"`;
     }
     const replaceClass = (isPackTarget && packIsFull) ? ' ps-slot-placement-target' : '';
     html += `<div class="ps-slot ps-slot-card ps-slot-filled${replaceClass}" ${tapAction}>${img ? `<img class="ps-slot-card-img" src="${img}">` : ''}<div class="ps-slot-label">${item.name}</div></div>`;
@@ -1770,7 +1885,7 @@ function renderPlayerSheetFull(player, placementInfo) {
     for (let mi = 0; mi < player.minions.length; mi++) {
       const m = player.minions[mi];
       const img = m.card_image ? `/images/${m.card_image}` : '';
-      html += `<div class="ps-minion-card" onclick="openCardZoomWithActions('${img}',{type:'minion',index:${mi},name:'${_esc(m.name)}'})"><img src="${img}" alt="${m.name}"></div>`;
+      html += `<div class="ps-minion-card" onclick="openCardZoomWithActions('${_esc(img)}',{type:'minion',index:${mi},name:'${_esc(m.name)}'})"><img src="${img}" alt="${m.name}"></div>`;
     }
     html += '</div>';
   }
@@ -1791,7 +1906,10 @@ function renderPlayerSheetFull(player, placementInfo) {
     html += '<div class="ps-tc-area"><div class="ps-tc-row">';
     if (traits.length) {
       html += '<div><div class="ps-tc-label ps-tc-label-trait">Traits</div><div class="ps-tc-stack">';
-      for (const t of traits) html += `<div class="ps-tc-card is-trait" onclick="showTcTooltip('${_esc(t.name)}','${_esc(t.description||'')}',this)">${t.name}</div>`;
+      for (const t of traits) {
+        const residualsBadge = t.effect_id === 'residuals' && t.strength_bonus > 0 ? ` <span class="tc-token-badge" style="font-size:10px;margin-left:4px">+${t.strength_bonus}</span>` : '';
+        html += `<div class="ps-tc-card is-trait" onclick="showTcTooltip('${_esc(t.name)}','${_esc(t.description||'')}',this)">${t.name}${residualsBadge}</div>`;
+      }
       html += '</div></div>';
     }
     if (curses.length) {
@@ -1956,7 +2074,7 @@ async function resolveCharlieWork(useIt) {
 // ================================================================
 // CONSUMABLES (overworld)
 // ================================================================
-async function usePackConsumable(idx) {
+async function usePackConsumable(idx, targetPlayerId) {
   const p = gameState?.players?.find(x => x.is_current);
   if (!p) return;
   const c = (p.consumables || [])[idx];
@@ -1975,22 +2093,43 @@ async function usePackConsumable(idx) {
   document.body.appendChild(overlay);
   overlay.querySelector('#confirm-use-cons').onclick = async () => {
     overlay.remove();
+    const body = {consumable_index: idx};
+    if (targetPlayerId !== undefined) body.target_player_id = targetPlayerId;
     const resp = await fetch('/api/use_consumable', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({consumable_index: idx}),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }
     if (data.state) { gameState = data.state; applyState(data.state); }
-    // Handle trait_gained response (e.g. Nectar of the Gods)
+    // Handle give_curse (bomb) response
+    if (data.phase === 'curse_given') {
+      _showConsumableResultPopup(data.target_name, data.curse_name, data.curse_desc, false);
+    }
+    // Handle trait_gained response (e.g. Nectar of the Gods, Priest's Blessing)
     if (data.phase === 'trait_gained') {
+      _showConsumableResultPopup(p.hero_name || p.name, data.trait_name, data.trait_desc, true);
       await _placePendingTraitItems();
       await _placePendingTraitMinions();
     }
     await loadAndRenderAbilities();
   };
   overlay.querySelector('#cancel-use-cons').onclick = () => overlay.remove();
+}
+
+function _showConsumableResultPopup(targetName, effectName, effectDesc, isTrait) {
+  const overlay = document.createElement('div');
+  overlay.className = 'consumable-modal-overlay';
+  const label = isTrait ? `${targetName} received trait:` : `${targetName} received curse:`;
+  overlay.innerHTML = `<div class="consumable-modal-box">
+    <div class="consumable-modal-title">${effectName}</div>
+    <div class="consumable-modal-msg">${label} <strong>${effectName}</strong>!</div>
+    ${effectDesc ? `<div class="consumable-modal-msg" style="font-style:italic;color:var(--text-dim);font-size:13px">${effectDesc}</div>` : ''}
+    <div class="consumable-modal-actions">
+      <button class="btn-primary" onclick="this.closest('.consumable-modal-overlay').remove()">OK</button>
+    </div></div>`;
+  document.body.appendChild(overlay);
 }
 
 // ================================================================

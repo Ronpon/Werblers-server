@@ -1380,6 +1380,24 @@ button {
   cursor: pointer;
   min-height: 40px;
 }
+.crossroads-item {
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+.crossroads-item.crossroads-selected {
+  background: rgba(232, 197, 90, 0.15);
+  border-color: #e8c55a;
+}
+.crossroads-check {
+  font-size: 18px;
+  min-width: 24px;
+  text-align: center;
+  color: var(--text-dim);
+}
+.crossroads-selected .crossroads-check {
+  color: #e8c55a;
+}
 
 /* Bystander banner */
 .bystander-banner {
@@ -1683,6 +1701,44 @@ button {
   border: 2px dashed var(--border);
   background: var(--surface3);
   opacity: 0.5;
+}
+
+/* Text-only pack thumbnail (item with no card image) */
+.pack-thumb-text {
+  width: 40px;
+  height: 56px;
+  border-radius: 4px;
+  border: 1px solid var(--gold);
+  background: var(--surface2);
+  color: var(--gold);
+  font-size: 9px;
+  font-family: 'Cinzel', serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  cursor: pointer;
+  padding: 2px;
+  overflow: hidden;
+  word-break: break-word;
+  line-height: 1.1;
+}
+
+/* Card zoom placeholder (when no image is available) */
+.card-zoom-placeholder {
+  min-width: 160px;
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Cinzel', serif;
+  color: var(--gold);
+  font-size: 18px;
+  text-align: center;
+  padding: 20px 16px;
+  border: 1px solid var(--gold);
+  border-radius: 10px;
+  background: var(--surface2);
 }
 
 /* Occupied slot card comparison */
