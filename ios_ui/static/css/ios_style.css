@@ -2158,3 +2158,192 @@ button {
   .battle-card-img { max-width: 160px; }
   .mystery-item-thumb { width: 70px; height: 98px; }
 }
+
+/* ================================================================
+   PROFILE SCREEN
+   ================================================================ */
+#profile-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+  gap: 12px;
+  text-align: center;
+}
+.profile-input {
+  font-family: 'Crimson Text', Georgia, serif;
+  font-size: 18px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1.5px solid var(--gold);
+  background: var(--surface2);
+  color: var(--text);
+  width: 100%;
+  max-width: 280px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+.profile-input::placeholder { color: var(--text-dim); }
+#profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 280px;
+}
+.btn-profile {
+  width: 100%;
+}
+
+/* ================================================================
+   MAIN MENU
+   ================================================================ */
+#main-menu-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+  gap: 8px;
+  text-align: center;
+}
+.main-menu-btns {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 280px;
+  margin-top: 14px;
+}
+.btn-menu { width: 100%; }
+
+/* ================================================================
+   TOP BAR BUTTONS (save/load + achievements + settings)
+   ================================================================ */
+#top-bar-btns {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+#top-bar-btns button {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  min-width: 36px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ================================================================
+   SAVE / LOAD MODAL
+   ================================================================ */
+.saveload-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.saveload-tab {
+  flex: 1;
+  padding: 10px;
+  font-family: 'Cinzel', serif;
+  font-size: 14px;
+  font-weight: 700;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.saveload-tab.active {
+  background: var(--gold);
+  color: var(--bg);
+  border-color: var(--gold);
+}
+#saveload-slots,
+#menu-load-slots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+.save-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.save-slot:active,
+.save-slot.selected {
+  border-color: var(--gold);
+  background: var(--surface3);
+}
+.slot-label {
+  font-family: 'Cinzel', serif;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--gold);
+}
+.slot-info {
+  font-size: 13px;
+  color: var(--text);
+}
+.slot-empty {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.slot-time {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ================================================================
+   ACHIEVEMENTS MODAL
+   ================================================================ */
+.achievement-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  opacity: 0.45;
+}
+.achievement-row.achieved { opacity: 1; }
+.achievement-check { font-size: 18px; flex-shrink: 0; }
+.achievement-desc { font-size: 14px; color: var(--text); }
+
+/* ================================================================
+   ACHIEVEMENT POPUP
+   ================================================================ */
+.achievement-popup-box {
+  text-align: center;
+  padding: 28px 24px;
+}
+.achievement-popup-icon {
+  font-size: 48px;
+  margin-bottom: 8px;
+}
+.achievement-popup-title {
+  font-family: 'Cinzel', serif;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--gold);
+  margin-bottom: 6px;
+}
+.achievement-popup-name {
+  font-size: 15px;
+  color: var(--text);
+  margin-bottom: 16px;
+}

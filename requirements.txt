@@ -1,5 +1,6 @@
 flask>=3.0
 gunicorn>=21.0
+psycopg2-binary>=2.9
 
 # Dev / tooling (not needed on Render)
 pytest>=7.0

@@ -11,7 +11,12 @@ from werblers_engine.heroes import HEROES, HeroId
 from werblers_engine.types import TileType
 from werblers_engine import content as C
 from werblers_engine import effects as _fx
+from werblers_engine import database as db
+from werblers_engine.save_load import serialize_game, deserialize_game
 app = Flask(__name__)
+
+# Initialise database tables on startup
+db.init_db()
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_DIR = os.path.join(BASE_DIR, "Images")
 MUSIC_DIR  = os.path.join(BASE_DIR, "Music")
@@ -659,6 +664,74 @@ def api_equip_from_pack():
     player.equip(item)
     return jsonify({"ok": True, "state": _build_state()})
 
+@app.route("/api/crossroads_discard", methods=["POST"])
+def api_crossroads_discard():
+    """Pre-fight Fair Exchange: discard selected equipped items before fighting Crossroads Demon.
+
+    JSON body:
+        equip_sources : list of {source: "equip_helmet"|..., index: int}
+    Returns updated state; also stores discarded items in pending_combat for bonus draws on win.
+    """
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    if _game._pending_combat is None:
+        return jsonify({"error": "No pending combat"}), 400
+    miniboss = _game._pending_combat.get("monster")
+    if not miniboss or getattr(miniboss, "effect_id", "") != "crossroads_demon":
+        return jsonify({"error": "Not a Crossroads Demon encounter"}), 400
+    data: dict = request.get_json(force=True) or {}
+    equip_sources: list[dict] = data.get("equip_sources", [])
+    player = _game.current_player
+    slot_map = {
+        "equip_helmet": player.helmets,
+        "equip_chest":  player.chest_armor,
+        "equip_leg":    player.leg_armor,
+        "equip_weapon": player.weapons,
+    }
+    # Sort descending by index so pops don't shift earlier indices
+    sorted_sources = sorted(equip_sources, key=lambda x: x.get("index", 0), reverse=True)
+    discarded: list = []
+    for src_info in sorted_sources:
+        source = src_info.get("source", "")
+        idx = int(src_info.get("index", -1))
+        item_list = slot_map.get(source)
+        if item_list is not None and 0 <= idx < len(item_list):
+            item = item_list.pop(idx)
+            discarded.append(item)
+    if discarded:
+        from werblers_engine import effects as _fx
+        _fx.refresh_tokens(player)
+        _game._pending_combat.setdefault("crossroads_discards", []).extend(discarded)
+        # Update ability mods in pending combat for updated STR display
+        from werblers_engine import encounters as _enc
+        _ab_log: list[str] = []
+        _ab_player_mod, _ab_monster_mod, _ = _enc._apply_miniboss_modifiers(
+            player, miniboss, _ab_log, _game.is_night)
+        _game._pending_combat["ability_player_mod"] = _ab_player_mod
+        _game._pending_combat["ability_monster_mod"] = _ab_monster_mod
+        _game._pending_combat["ability_breakdown"] = _ab_log
+    # Build updated combat info for the front-end to refresh the pre-fight display
+    pc = _game._pending_combat
+    combat_info = {
+        "monster_name": miniboss.name,
+        "monster_strength": miniboss.strength + pc.get("ability_monster_mod", 0),
+        "player_strength": player.combat_strength() + pc.get("ability_player_mod", 0),
+        "ability_player_mod": pc.get("ability_player_mod", 0),
+        "ability_monster_mod": pc.get("ability_monster_mod", 0),
+        "ability_breakdown": pc.get("ability_breakdown", []),
+        "description": getattr(miniboss, "description", ""),
+        "effect_id": miniboss.effect_id,
+        "player_id": player.player_id,
+        "player_name": player.name,
+        "hero_id": player.hero.id.name if player.hero else None,
+        "category": "miniboss",
+        "level": pc.get("level", 2),
+        "result": None,
+        "crossroads_discards_count": len(pc.get("crossroads_discards", [])),
+    }
+    combat_info = _enrich_combat_info(combat_info)
+    return jsonify({"ok": True, "state": _build_state(), "combat_info": combat_info})
+
 @app.route("/api/manage_item", methods=["POST"])
 def api_manage_item():
     """Discard or move-to-pack an equipped or packed item from the player sheet.
@@ -912,6 +985,9 @@ def api_use_consumable():
                             "combat_info": _enrich_combat_info(combat_info)})
         # During combat: capture the current monster
         pc = _game._pending_combat
+        if pc.get("type") in ("miniboss", "werbler"):
+            player.consumables.insert(idx, consumable)
+            return jsonify({"error": "Monster Capture Devices cannot be used on mini-bosses or Werblers!"}), 400
         monster = pc.get("monster") if pc else None
         if monster is None:
             player.consumables.insert(idx, consumable)
@@ -1630,6 +1706,100 @@ def _build_state() -> dict:
         "prefight_str_bonus": g._prefight_str_bonus,
         "prefight_monster_str_bonus": g._prefight_monster_str_bonus,
     }
+# ══════════════════════════════════════════════════════════════════
+# Profile / Save / Load / Achievement API
+# ══════════════════════════════════════════════════════════════════
+
+@app.route("/api/profiles", methods=["GET"])
+def api_list_profiles():
+    device_id = request.args.get("device_id", "")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    return jsonify({"profiles": db.list_profiles(device_id)})
+
+@app.route("/api/profiles", methods=["POST"])
+def api_create_profile():
+    data = request.get_json(force=True) or {}
+    device_id = data.get("device_id", "")
+    name = data.get("name", "").strip()
+    if not device_id or not name:
+        return jsonify({"error": "device_id and name required"}), 400
+    profile = db.create_profile(device_id, name)
+    return jsonify({"profile": profile})
+
+@app.route("/api/saves", methods=["GET"])
+def api_list_saves():
+    profile_id = request.args.get("profile_id", type=int)
+    if profile_id is None:
+        return jsonify({"error": "profile_id required"}), 400
+    return jsonify({"saves": db.list_saves(profile_id)})
+
+@app.route("/api/save", methods=["POST"])
+def api_save_game():
+    global _game
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    data = request.get_json(force=True) or {}
+    profile_id = data.get("profile_id")
+    slot_number = data.get("slot_number")
+    if profile_id is None or slot_number is None:
+        return jsonify({"error": "profile_id and slot_number required"}), 400
+    slot_number = int(slot_number)
+    if not 1 <= slot_number <= 10:
+        return jsonify({"error": "slot_number must be 1-10"}), 400
+    game_json = serialize_game(_game)
+    hero_names = ", ".join(p.name for p in _game.players)
+    result = db.save_game(
+        profile_id=int(profile_id),
+        slot_number=slot_number,
+        game_state_json=game_json,
+        turn_number=_game.turn_number,
+        num_players=len(_game.players),
+        hero_names=hero_names,
+    )
+    return jsonify({"ok": True, "save": result})
+
+@app.route("/api/load", methods=["POST"])
+def api_load_game():
+    global _game, _last_log, _pending_log
+    data = request.get_json(force=True) or {}
+    profile_id = data.get("profile_id")
+    slot_number = data.get("slot_number")
+    if profile_id is None or slot_number is None:
+        return jsonify({"error": "profile_id and slot_number required"}), 400
+    game_json = db.load_save(int(profile_id), int(slot_number))
+    if game_json is None:
+        return jsonify({"error": "Save not found"}), 404
+    _game = deserialize_game(game_json)
+    _pending_log = []
+    _last_log = ["Game loaded!"]
+    return jsonify({"ok": True, "state": _build_state()})
+
+@app.route("/api/achievements", methods=["GET"])
+def api_list_achievements():
+    profile_id = request.args.get("profile_id", type=int)
+    if profile_id is None:
+        return jsonify({"error": "profile_id required"}), 400
+    return jsonify({"achievements": db.list_achievements(profile_id)})
+
+@app.route("/api/achievements", methods=["POST"])
+def api_grant_achievement():
+    data = request.get_json(force=True) or {}
+    profile_id = data.get("profile_id")
+    achievement_key = data.get("achievement")
+    if profile_id is None or not achievement_key:
+        return jsonify({"error": "profile_id and achievement required"}), 400
+    newly = db.grant_achievement(int(profile_id), achievement_key)
+    # Check for Total Victory
+    if newly and achievement_key != "total_victory":
+        non_total = len(db.ACHIEVEMENT_DEFS) - 1  # exclude total_victory itself
+        earned = db.count_achievements(int(profile_id))
+        if earned >= non_total:
+            db.grant_achievement(int(profile_id), "total_victory")
+    return jsonify({"ok": True, "newly_granted": newly,
+                    "achievements": db.list_achievements(int(profile_id))})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)

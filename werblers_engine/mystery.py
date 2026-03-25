@@ -41,9 +41,9 @@ _EVENT_TABLE: list[tuple[str, str, str, str]] = [
     ("mystery_box",  "Mystery Box",  "common",   "Mystery Box"),
     ("the_wheel",    "The Wheel",    "common",   "Wheel"),
     ("the_smith",    "The Smith",    "uncommon", "Smith"),
-    ("bandits",      "Bandits",      "uncommon", "Bandits"),
-    ("thief",        "Thief",        "rare",     "Thief"),
-    ("beggar",       "Beggar",       "rare",     "Beggar"),
+    ("bandits",      "Bandits",      "very_rare", "Bandits"),
+    ("thief",        "Thief",        "very_rare", "Thief"),
+    ("beggar",       "Beggar",       "uncommon",  "Beggar"),
 ]
 
 _RARITY_WEIGHTS = {

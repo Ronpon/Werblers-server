@@ -23,18 +23,31 @@ let _pendingPlacement = null;
 let _pendingCombatInfo = null;
 let _crossroadsSelectedSources = []; // tracks selected discard items for Crossroads Demon
 
+// Profile / Save / Achievement state
+let _deviceId    = '';
+let _profileId   = null;
+let _profileName = '';
+let _saveLoadMode = 'save';
+let _selectedSlot = null;
+let _savesData    = [];
+let _pendingAchievements = [];
+let _achievementPopupActive = false;
+let _achievementsTriggeredThisSession = new Set();
+
 // ================================================================
 // INITIALIZATION
 // ================================================================
 document.addEventListener('DOMContentLoaded', initSetup);
 
 function initSetup() {
+  _initDeviceId();
   fetch('/api/heroes').then(r => r.json()).then(data => {
     heroData = Array.isArray(data) ? data : (data.heroes || []);
     heroAnimMap = {};
     for (const h of heroData) {
       if (h.animations) heroAnimMap[h.id] = h.animations;
     }
+    _loadProfileScreen();
   });
 }
 
@@ -1937,6 +1950,11 @@ function closePlayerSheet() {
 
 function _placeIntoSlot(slotKey, idx) {
   const p = gameState?.players?.find(pl => pl.is_current);
+  // Special case: placing a 2H weapon when both weapon slots are occupied
+  if (slotKey === 'weapon' && _invPlacementItem && _invPlacementItem.hands === 2 && (p?.weapons || []).length >= 2) {
+    _handle2HFullEquip(p.weapons[0], p.weapons[1], p);
+    return;
+  }
   // Check if slot is occupied
   let existingItem = null;
   if (slotKey === 'helmet') existingItem = (p?.helmets || [])[idx];
@@ -2041,6 +2059,80 @@ function _showPlacementPackDiscardChoice(equipItemIdx) {
     _finishPlacement({placement: 'equip', equip_action: 'swap', equip_item_index: equipItemIdx, pack_discard_index: dpi});
   };
   window._cancelPlacementPackDiscard = () => overlay.remove();
+}
+
+// 2H weapon full-equip: sequentially ask what to do with each of the two occupied weapon slots.
+function _handle2HFullEquip(w0, w1, player) {
+  _show2HDisplaceModal(w0, player.pack_slots_free, (action1, pdi1, packFreeAfter1) => {
+    _show2HDisplaceModal(w1, packFreeAfter1, (action2, pdi2) => {
+      _finishPlacement({
+        placement: 'equip',
+        equip_item_index: 0,
+        equip_action: action1,
+        pack_discard_index: pdi1,
+        equip_action_2: action2,
+        pack_discard_index_2: pdi2,
+      });
+    });
+  });
+}
+
+function _show2HDisplaceModal(weapon, packFree, onChoice) {
+  const overlay = document.createElement('div');
+  overlay.className = 'action-sheet-overlay';
+  const sheet = document.createElement('div');
+  sheet.className = 'action-sheet';
+  const imgHtml = weapon.card_image
+    ? `<img src="/images/${weapon.card_image}" style="width:90px;border-radius:6px;margin:0 auto 10px;display:block" onclick="openCardZoom('/images/${weapon.card_image}')">`
+    : '';
+  sheet.innerHTML = `
+    <div style="text-align:center;padding:6px 0;font-family:'Cinzel',serif;color:var(--gold);font-size:15px">Equipping 2-Handed Weapon</div>
+    ${imgHtml}
+    <div style="text-align:center;font-size:13px;color:var(--text);margin-bottom:14px">What should happen to <b>${weapon.name}</b>?</div>
+    <div class="action-sheet-item" id="btn-2h-pack">Move to Pack${packFree <= 0 ? ' (full)' : ''}</div>
+    <div class="action-sheet-item danger" id="btn-2h-discard">Discard</div>`;
+  overlay.appendChild(sheet);
+  document.body.appendChild(overlay);
+
+  sheet.querySelector('#btn-2h-discard').onclick = () => {
+    overlay.remove();
+    onChoice('discard', -1, packFree);
+  };
+  sheet.querySelector('#btn-2h-pack').onclick = () => {
+    overlay.remove();
+    if (packFree > 0) {
+      onChoice('swap', -1, packFree - 1);
+    } else {
+      _show2HPackDiscardChoice(weapon, (pdi) => onChoice('swap', pdi, 0));
+    }
+  };
+}
+
+function _show2HPackDiscardChoice(weapon, onChoice) {
+  const p = gameState?.players?.find(pl => pl.is_current);
+  const packItems = [
+    ...(p?.pack || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: i })),
+    ...(p?.consumables || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: (p.pack || []).length + i })),
+    ...(p?.captured_monsters || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: (p.pack || []).length + (p.consumables || []).length + i })),
+  ];
+  const overlay = document.createElement('div');
+  overlay.className = 'action-sheet-overlay';
+  const box = document.createElement('div');
+  box.className = 'action-sheet';
+  box.innerHTML = `
+    <div style="text-align:center;margin-bottom:10px"><div style="font-family:'Cinzel',serif;color:var(--gold)">Pack Full</div>
+    <div style="font-size:12px;color:var(--text-dim);margin-top:6px">Discard a pack item to make room for <b>${weapon.name}</b>:</div></div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${packItems.map(pi => {
+      const img = pi.card_image ? `<img src="/images/${pi.card_image}" style="width:60px;border-radius:4px">` : '';
+      return `<div class="rake-equip-btn" data-pack-idx="${pi.idx}">${img}<div class="rake-item-name">${pi.name}</div></div>`;
+    }).join('')}</div>
+    <div class="action-sheet-cancel">Cancel</div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  box.querySelectorAll('[data-pack-idx]').forEach(el => {
+    el.addEventListener('click', () => { overlay.remove(); onChoice(parseInt(el.dataset.packIdx)); });
+  });
+  box.querySelector('.action-sheet-cancel').onclick = () => overlay.remove();
 }
 
 // ================================================================
@@ -3228,7 +3320,13 @@ function applyState(state) {
     document.getElementById('winner-title').textContent = `${winnerP?.hero_name || 'Someone'} Wins!`;
     document.getElementById('winner-text').textContent = 'Congratulations!';
     document.getElementById('winner-modal').classList.remove('hidden');
+    _checkAchievement('victory');
+    if (state.players.length > 1) _checkAchievement('champion');
   }
+  // Check miniboss achievements
+  const curP = state.players.find(p => p.is_current);
+  if (curP && curP.miniboss1_defeated) _checkAchievement('a_strong_start');
+  if (curP && curP.miniboss2_defeated) _checkAchievement('getting_closer');
 
   // Phase-specific triggers are handled by the callers (beginMove, resolveOffer, etc.)
   // applyState only updates UI state
@@ -3255,4 +3353,292 @@ async function summonMonster(idx) {
   });
   const data = await resp.json();
   if (data.state) { gameState = data.state; applyState(data.state); }
+}
+
+// ================================================================
+// DEVICE ID
+// ================================================================
+function _initDeviceId() {
+  let id = localStorage.getItem('werblers_device_id');
+  if (!id) {
+    id = 'dev_' + crypto.randomUUID();
+    localStorage.setItem('werblers_device_id', id);
+  }
+  _deviceId = id;
+}
+
+// ================================================================
+// PROFILE SCREEN
+// ================================================================
+async function _loadProfileScreen() {
+  const resp = await fetch('/api/profiles?device_id=' + encodeURIComponent(_deviceId));
+  const data = await resp.json();
+  const profiles = data.profiles || [];
+  if (profiles.length === 0) {
+    document.getElementById('profile-create-section').classList.remove('hidden');
+    document.getElementById('profile-select-section').classList.add('hidden');
+  } else {
+    _renderProfileList(profiles);
+    document.getElementById('profile-create-section').classList.add('hidden');
+    document.getElementById('profile-select-section').classList.remove('hidden');
+  }
+  document.getElementById('profile-screen').classList.remove('hidden');
+  document.getElementById('main-menu-screen').classList.add('hidden');
+  document.getElementById('setup-screen-1').classList.add('hidden');
+  document.getElementById('setup-screen-2').classList.add('hidden');
+  document.getElementById('game-screen').classList.add('hidden');
+}
+
+function _renderProfileList(profiles) {
+  const list = document.getElementById('profile-list');
+  list.innerHTML = '';
+  for (const p of profiles) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-primary btn-lg btn-profile';
+    btn.textContent = p.name;
+    btn.addEventListener('click', () => selectProfile(p));
+    list.appendChild(btn);
+  }
+}
+
+function showCreateProfile() {
+  document.getElementById('profile-create-section').classList.remove('hidden');
+  document.getElementById('profile-select-section').classList.add('hidden');
+}
+
+async function createProfile() {
+  const nameInput = document.getElementById('profile-name-input');
+  const name = nameInput.value.trim();
+  if (!name) return;
+  const resp = await fetch('/api/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: _deviceId, name }),
+  });
+  const data = await resp.json();
+  nameInput.value = '';
+  selectProfile(data.profile);
+}
+
+function selectProfile(profile) {
+  _profileId = profile.id;
+  _profileName = profile.name;
+  document.getElementById('profile-screen').classList.add('hidden');
+  document.getElementById('main-menu-screen').classList.remove('hidden');
+  document.getElementById('menu-profile-name').textContent = 'Welcome, ' + _profileName + '!';
+}
+
+function changeProfile() {
+  _profileId = null;
+  _profileName = '';
+  _loadProfileScreen();
+}
+
+function exitGame() {
+  _profileId = null;
+  _profileName = '';
+  _loadProfileScreen();
+}
+
+// ================================================================
+// MAIN MENU
+// ================================================================
+function goToNewGame() {
+  document.getElementById('main-menu-screen').classList.add('hidden');
+  document.getElementById('setup-screen-1').classList.remove('hidden');
+}
+
+// ================================================================
+// SAVE / LOAD MODAL
+// ================================================================
+function openSaveLoadModal() {
+  _saveLoadMode = 'save';
+  _selectedSlot = null;
+  document.getElementById('saveload-modal').classList.remove('hidden');
+  _refreshSaveSlots();
+}
+function closeSaveLoadModal() { document.getElementById('saveload-modal').classList.add('hidden'); }
+
+function setSaveLoadMode(mode) {
+  _saveLoadMode = mode;
+  _selectedSlot = null;
+  document.querySelectorAll('.saveload-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+  const btn = document.getElementById('saveload-confirm-btn');
+  btn.textContent = mode === 'save' ? 'Save' : 'Load';
+  btn.disabled = true;
+  _refreshSaveSlots();
+}
+
+async function _refreshSaveSlots() {
+  if (!_profileId) return;
+  const resp = await fetch('/api/saves?profile_id=' + _profileId);
+  const data = await resp.json();
+  _savesData = data.saves || [];
+  _renderSaveSlots('saveload-slots');
+}
+
+function _renderSaveSlots(containerId) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  const isMenuLoad = containerId === 'menu-load-slots';
+  for (let i = 1; i <= 10; i++) {
+    const save = _savesData.find(s => s.slot_number === i);
+    const slot = document.createElement('div');
+    slot.className = 'save-slot' + (_selectedSlot === i ? ' selected' : '');
+    if (save) {
+      const dt = new Date(save.saved_at);
+      const timeStr = dt.toLocaleString();
+      slot.innerHTML = `<span class="slot-label">Slot ${i}</span>
+        <span class="slot-info">${save.hero_names} · ${save.num_players}P · Turn ${save.turn_number}</span>
+        <span class="slot-time">${timeStr}</span>`;
+    } else {
+      slot.innerHTML = `<span class="slot-label">Slot ${i}</span><span class="slot-info slot-empty">— Empty —</span>`;
+    }
+    slot.addEventListener('click', () => {
+      _selectedSlot = i;
+      const btnId = isMenuLoad ? 'menu-load-btn' : 'saveload-confirm-btn';
+      const btn = document.getElementById(btnId);
+      if ((_saveLoadMode === 'load' || isMenuLoad) && !save) { btn.disabled = true; } else { btn.disabled = false; }
+      container.querySelectorAll('.save-slot').forEach(s => s.classList.remove('selected'));
+      slot.classList.add('selected');
+    });
+    container.appendChild(slot);
+  }
+}
+
+async function confirmSaveLoad() {
+  if (_selectedSlot === null) return;
+  if (_saveLoadMode === 'save') {
+    const existing = _savesData.find(s => s.slot_number === _selectedSlot);
+    if (existing) { document.getElementById('overwrite-modal').classList.remove('hidden'); return; }
+    await _doSave();
+  } else {
+    await _doLoad();
+  }
+}
+async function confirmOverwrite(yes) {
+  document.getElementById('overwrite-modal').classList.add('hidden');
+  if (yes) await _doSave();
+}
+async function _doSave() {
+  const resp = await fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) closeSaveLoadModal();
+}
+async function _doLoad() {
+  const resp = await fetch('/api/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    closeSaveLoadModal();
+    document.getElementById('setup-screen-1').classList.add('hidden');
+    document.getElementById('setup-screen-2').classList.add('hidden');
+    document.getElementById('main-menu-screen').classList.add('hidden');
+    document.getElementById('profile-screen').classList.add('hidden');
+    document.getElementById('game-screen').classList.remove('hidden');
+    _boardBuilt = false;
+    gameState = data.state;
+    viewingPlayerId = data.state.current_player_id;
+    buildBoard();
+    applyState(data.state);
+  }
+}
+
+// ================================================================
+// LOAD FROM MAIN MENU
+// ================================================================
+async function openLoadFromMenu() {
+  _selectedSlot = null;
+  _saveLoadMode = 'load';
+  const resp = await fetch('/api/saves?profile_id=' + _profileId);
+  const data = await resp.json();
+  _savesData = data.saves || [];
+  _renderSaveSlots('menu-load-slots');
+  document.getElementById('menu-load-modal').classList.remove('hidden');
+}
+function closeMenuLoadModal() { document.getElementById('menu-load-modal').classList.add('hidden'); }
+
+async function menuLoadGame() {
+  if (_selectedSlot === null) return;
+  const resp = await fetch('/api/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    closeMenuLoadModal();
+    document.getElementById('main-menu-screen').classList.add('hidden');
+    document.getElementById('game-screen').classList.remove('hidden');
+    _boardBuilt = false;
+    gameState = data.state;
+    viewingPlayerId = data.state.current_player_id;
+    buildBoard();
+    applyState(data.state);
+  }
+}
+
+// ================================================================
+// ACHIEVEMENTS
+// ================================================================
+async function openAchievementsModal() {
+  if (!_profileId) return;
+  const resp = await fetch('/api/achievements?profile_id=' + _profileId);
+  const data = await resp.json();
+  const list = document.getElementById('achievements-list');
+  list.innerHTML = '';
+  for (const a of (data.achievements || [])) {
+    const row = document.createElement('div');
+    row.className = 'achievement-row' + (a.achieved ? ' achieved' : '');
+    row.innerHTML = `<span class="achievement-check">${a.achieved ? '✅' : '⬜'}</span>
+                     <span class="achievement-desc">${a.description}</span>`;
+    list.appendChild(row);
+  }
+  document.getElementById('achievements-modal').classList.remove('hidden');
+}
+function closeAchievementsModal() { document.getElementById('achievements-modal').classList.add('hidden'); }
+
+async function _checkAchievement(key) {
+  if (!_profileId) return;
+  if (_achievementsTriggeredThisSession.has(key)) return;
+  _achievementsTriggeredThisSession.add(key);
+  const resp = await fetch('/api/achievements', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, achievement: key }),
+  });
+  const data = await resp.json();
+  if (data.newly_granted) {
+    const ach = (data.achievements || []).find(a => a.key === key);
+    const desc = ach ? ach.description : key;
+    _pendingAchievements.push(desc);
+    _showNextAchievementPopup();
+    const totalV = (data.achievements || []).find(a => a.key === 'total_victory' && a.achieved);
+    if (totalV && !_achievementsTriggeredThisSession.has('total_victory_shown')) {
+      _achievementsTriggeredThisSession.add('total_victory_shown');
+      const tvDesc = (data.achievements || []).find(a => a.key === 'total_victory');
+      if (tvDesc) _pendingAchievements.push(tvDesc.description);
+    }
+  }
+}
+
+function _showNextAchievementPopup() {
+  if (_achievementPopupActive || _pendingAchievements.length === 0) return;
+  _achievementPopupActive = true;
+  const desc = _pendingAchievements.shift();
+  document.getElementById('achievement-popup-name').textContent = desc;
+  document.getElementById('achievement-popup').classList.remove('hidden');
+}
+
+function dismissAchievementPopup() {
+  document.getElementById('achievement-popup').classList.add('hidden');
+  _achievementPopupActive = false;
+  _showNextAchievementPopup();
 }

@@ -893,7 +893,8 @@ class Game:
                     f"Reuse your last played card value ({player.last_card_played}) "
                     "instead of playing a new card."
                 ),
-                "type": "toggle",
+                "type": "activate",
+                "value": player.last_card_played,
             })
 
         # Post-card passive abilities (applied automatically after card is chosen)
@@ -1415,6 +1416,7 @@ class Game:
                 "ability_monster_mod": _ab_monster_mod + ogre_monster_mod,
                 "ability_breakdown": _ab_log,
                 "description": miniboss.description,
+                "effect_id": miniboss.effect_id,
                 "player_id": player.player_id,
                 "player_name": player.name,
                 "hero_id": player.hero.id.name if player.hero else None,
@@ -1579,6 +1581,12 @@ class Game:
             # Swiftness flee is handled via the dedicated UI button; never auto-trigger it
             if "swiftness" in prompt.lower():
                 return False
+            # Pre-fight monster-redraw features are handled via dedicated UI endpoints;
+            # never auto-trigger them here to prevent the wrong monster being fought.
+            if "transmogrifier" in prompt.lower():
+                return False
+            if "come in again" in prompt.lower() or "i see everything" in prompt.lower():
+                return False
             return self._decide(prompt, log_)
 
         if combat_type == "miniboss":
@@ -1602,6 +1610,22 @@ class Game:
                 extra_player_strength=extra_str,
                 extra_monster_strength=monster_str_delta,
             )
+            # --- Crossroads Demon: Fair Exchange bonus draws ---
+            crossroads_items = pc.get("crossroads_discards", [])
+            if combat_result == CombatResult.WIN and crossroads_items and miniboss.effect_id == "crossroads_demon":
+                n = len(crossroads_items)
+                bonus_drawn: list = []
+                for _ in range(n):
+                    extra = self.item_decks[reward_deck_level].draw()
+                    if extra:
+                        bonus_drawn.append(extra)
+                if bonus_drawn:
+                    names = [i.name for i in bonus_drawn]
+                    log.append(f"  Fair Exchange: {n} discards → {len(bonus_drawn)} T{reward_deck_level} bonus item(s): {', '.join(names)}")
+                    for bonus_item in bonus_drawn:
+                        player.pending_trait_items.append(bonus_item)
+                else:
+                    log.append(f"  Fair Exchange: {n} discards → reward deck empty, no bonus items.")
             if combat_result == CombatResult.WIN:
                 if boss_tile == 30:
                     player.miniboss1_defeated = True
@@ -2122,35 +2146,67 @@ class Game:
                     else:
                         log.append(f"  Cannot equip {item.name} and pack full — discarded.")
                 else:
-                    cur_idx = min(
-                        int(choices.get("equip_item_index", len(slot_list) - 1)),
-                        len(slot_list) - 1,
-                    )
-                    current = slot_list[cur_idx]
-                    action = choices.get("equip_action", "swap")
-                    if action == "swap":
-                        if player.pack_slots_free > 0:
-                            player.unequip(current)
-                            player.pack.append(current)
-                            player.equip(item)
-                            log.append(
-                                f"  {current.name} moved to pack. {item.name} equipped."
-                            )
-                        else:
-                            discard_idx = int(choices.get("pack_discard_index", 0))
-                            evicted_name = player.evict_pack_slot(discard_idx)
-                            if evicted_name:
-                                log.append(f"  Pack full — {evicted_name} discarded.")
-                            player.unequip(current)
-                            player.pack.append(current)
-                            player.equip(item)
-                            log.append(
-                                f"  {current.name} moved to pack. {item.name} equipped."
-                            )
-                    else:  # discard currently equipped
-                        player.unequip(current)
+                    # 2H weapon with both weapon slots occupied — must clear both
+                    if item.slot.value == "weapon" and item.hands == 2 and len(slot_list) >= 2:
+                        for act_key, pdi_key in [
+                            ("equip_action", "pack_discard_index"),
+                            ("equip_action_2", "pack_discard_index_2"),
+                        ]:
+                            if not slot_list:
+                                break
+                            w = slot_list[0]
+                            act = choices.get(act_key, "discard")
+                            pdi = int(choices.get(pdi_key, -1))
+                            if act == "swap":
+                                if player.pack_slots_free > 0:
+                                    player.unequip(w)
+                                    player.pack.append(w)
+                                    log.append(f"  {w.name} moved to pack.")
+                                elif pdi >= 0:
+                                    evicted_name = player.evict_pack_slot(pdi)
+                                    if evicted_name:
+                                        log.append(f"  Pack full — {evicted_name} discarded.")
+                                    player.unequip(w)
+                                    player.pack.append(w)
+                                    log.append(f"  {w.name} moved to pack.")
+                                else:
+                                    player.unequip(w)
+                                    log.append(f"  Pack full — {w.name} discarded.")
+                            else:
+                                player.unequip(w)
+                                log.append(f"  {w.name} discarded.")
                         player.equip(item)
-                        log.append(f"  {current.name} discarded. {item.name} equipped.")
+                        log.append(f"  {item.name} (2H) equipped.")
+                    else:
+                        cur_idx = min(
+                            int(choices.get("equip_item_index", len(slot_list) - 1)),
+                            len(slot_list) - 1,
+                        )
+                        current = slot_list[cur_idx]
+                        action = choices.get("equip_action", "swap")
+                        if action == "swap":
+                            if player.pack_slots_free > 0:
+                                player.unequip(current)
+                                player.pack.append(current)
+                                player.equip(item)
+                                log.append(
+                                    f"  {current.name} moved to pack. {item.name} equipped."
+                                )
+                            else:
+                                discard_idx = int(choices.get("pack_discard_index", 0))
+                                evicted_name = player.evict_pack_slot(discard_idx)
+                                if evicted_name:
+                                    log.append(f"  Pack full — {evicted_name} discarded.")
+                                player.unequip(current)
+                                player.pack.append(current)
+                                player.equip(item)
+                                log.append(
+                                    f"  {current.name} moved to pack. {item.name} equipped."
+                                )
+                        else:  # discard currently equipped
+                            player.unequip(current)
+                            player.equip(item)
+                            log.append(f"  {current.name} discarded. {item.name} equipped.")
         else:  # pack
             if player.add_to_pack(item):
                 log.append(f"  {item.name} added to pack.")

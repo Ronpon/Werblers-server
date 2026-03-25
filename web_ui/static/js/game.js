@@ -8,6 +8,20 @@ let heroAnimMap = {};      // heroId -> {general, victory, defeat}
 // Ability toggles collected before playing a card
 let abilityChoices = {};   // { ability_id: true | {args} }
 
+// ================================================================ PROFILE / SAVE / ACHIEVEMENT STATE
+let _deviceId    = '';
+let _profileId   = null;
+let _profileName = '';
+let _saveLoadMode = 'save';  // 'save' or 'load'
+let _selectedSlot = null;
+let _savesData    = [];       // cached save slot list
+let _pendingAchievements = []; // queue for popups
+let _achievementPopupActive = false;
+
+// Werbler win counter stored client-side per session (for "this_is_easy" / "champion" tracking)
+let _werblerWins = 0;
+let _multiplayerWins = 0;
+
 // ================================================================ MUSIC
 const _music = { audio: null, current: null, masterVol: 0.8, musicVol: 0.8 };
 
@@ -65,12 +79,14 @@ async function initSetup() {
   }, true);
   const resp = await fetch('/api/heroes');
   heroData = await resp.json();
-  // Build animation map from hero data
   heroAnimMap = {};
   for (const h of heroData) {
     if (h.animations) heroAnimMap[h.id] = h.animations;
   }
-  setNumPlayers(1);
+  // Initialise device ID (stored in localStorage)
+  _initDeviceId();
+  // Check for existing profiles
+  await _loadProfileScreen();
 }
 function setNumPlayers(n) {
   numPlayers = n;
@@ -153,6 +169,7 @@ async function startGame() {
   const data = await resp.json();
   document.getElementById('setup-screen').classList.add('hidden');
   document.getElementById('game-screen').classList.remove('hidden');
+  document.getElementById('game-side-buttons').classList.remove('hidden');
   viewingPlayerId = data.state.current_player_id;
   applyState(data.state);
   _resumeTierMusic(data.state);
@@ -593,6 +610,11 @@ function renderAbilityPanel() {
             <button class="btn-primary ability-instant-btn" onclick="useEightLives(parseInt(document.getElementById('eight-lives-curse-select').value))">Use Eight Lives</button>
           </div>`;
       }
+    } else if (ab.type === 'activate') {
+      const rawVal = ab.value || 0;
+      row.innerHTML = `
+        <div class="ability-desc">${ab.description}</div>
+        <button class="btn-primary ability-activate-btn" onclick="activateWheelies(${rawVal})">&#x1F6FC; Use Wheelies!</button>`;
     }
     container.appendChild(row);
   }
@@ -621,6 +643,15 @@ function onAbilitySelectField(el) {
   if (abilityChoices[id] && typeof abilityChoices[id] === 'object') {
     abilityChoices[id][field] = val;
   }
+}
+function activateWheelies(rawVal) {
+  if (_moveInFlight) return;
+  const p = gameState && gameState.players.find(x => x.is_current);
+  if (!p) return;
+  const heroBonus = p.movement_card_bonus || 0;
+  const dispVal = rawVal + heroBonus;
+  abilityChoices['wheelies'] = true;
+  promptDirection(0, dispVal);
 }
 async function useEightLives(curseIndex) {
   const resp = await fetch('/api/use_eight_lives', {
@@ -924,10 +955,96 @@ function _psPlaceEquip() {
 // Called when clicking on an occupied equip slot — show options modal.
 function _psPlaceEquipDiscard(slotKey, idx) {
   const p = gameState.players.find(pl => pl.is_current);
+  // Special case: placing a 2H weapon when both weapon slots are occupied
+  if (slotKey === 'equip_weapon' && _invPlacementItem && _invPlacementItem.hands === 2 && (p.weapons || []).length >= 2) {
+    _handle2HFullEquip(p.weapons[0], p.weapons[1], p);
+    return;
+  }
   const slotDataMap = { equip_helmet: p.helmets, equip_chest: p.chest_armor, equip_leg: p.leg_armor, equip_weapon: p.weapons };
   const existing = (slotDataMap[slotKey] || [])[idx];
   const name = existing ? existing.name : 'the current item';
   _showOccupiedSlotModal(name, slotKey, idx);
+}
+
+// 2H weapon full-equip: sequentially ask what to do with each of the two occupied weapon slots.
+function _handle2HFullEquip(w0, w1, player) {
+  _show2HDisplaceModal(w0, player.pack_slots_free, (action1, pdi1, packFreeAfter1) => {
+    _show2HDisplaceModal(w1, packFreeAfter1, (action2, pdi2) => {
+      _finishPlacement({
+        placement: 'equip',
+        equip_item_index: 0,
+        equip_action: action1,
+        pack_discard_index: pdi1,
+        equip_action_2: action2,
+        pack_discard_index_2: pdi2,
+      });
+    });
+  });
+}
+
+// Show a single "what to do with THIS weapon?" modal. Calls onChoice(action, packDiscardIdx, packFreeAfter).
+function _show2HDisplaceModal(weapon, packFree, onChoice) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2010;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#444);border-radius:12px;padding:22px 26px;max-width:380px;text-align:center';
+  const imgHtml = weapon.card_image
+    ? `<img src="/images/${weapon.card_image}" style="width:90px;border-radius:6px;margin:0 auto 12px;display:block" onclick="event.stopPropagation();zoomCard(this.src)">`
+    : '';
+  box.innerHTML = `
+    <div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:10px">Equipping 2-Handed Weapon</div>
+    ${imgHtml}
+    <div style="font-size:13px;color:var(--text,#e0e0e0);margin-bottom:18px">What should happen to <b>${weapon.name}</b>?</div>
+    <div style="display:flex;gap:10px;justify-content:center">
+      <button class="btn-primary" id="btn-2h-pack">${packFree > 0 ? 'Move to Pack' : 'Move to Pack (full)'}</button>
+      <button class="btn-secondary btn-danger-hover" id="btn-2h-discard">Discard</button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  box.querySelector('#btn-2h-discard').onclick = () => {
+    overlay.remove();
+    onChoice('discard', -1, packFree);
+  };
+  box.querySelector('#btn-2h-pack').onclick = () => {
+    if (packFree > 0) {
+      overlay.remove();
+      onChoice('swap', -1, packFree - 1);
+    } else {
+      // Pack is full — pick which pack item to discard to make room
+      overlay.remove();
+      _show2HPackDiscardChoice(weapon, (pdi) => onChoice('swap', pdi, 0));
+    }
+  };
+}
+
+// Show pack-item-to-discard picker when pack is full during 2H displacement.
+function _show2HPackDiscardChoice(weapon, onChoice) {
+  const p = gameState.players.find(pl => pl.is_current);
+  const packItems = [
+    ...(p.pack || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: i })),
+    ...(p.consumables || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: (p.pack || []).length + i })),
+    ...(p.captured_monsters || []).map((item, i) => ({ name: item.name, card_image: item.card_image, idx: (p.pack || []).length + (p.consumables || []).length + i })),
+  ];
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2011;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--card-bg,#1a1a2e);border:1px solid var(--border,#444);border-radius:12px;padding:20px 24px;max-width:480px;text-align:center';
+  box.innerHTML = `
+    <div style="font-family:'Cinzel',serif;font-size:14px;color:var(--gold,#c9a84c);margin-bottom:10px">Pack Full</div>
+    <div style="font-size:12px;color:var(--text,#e0e0e0);margin-bottom:14px">Discard a pack item to make room for <b>${weapon.name}</b>:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center">${packItems.map(pi => {
+      const img = pi.card_image ? `<img src="/images/${pi.card_image}" style="width:70px;border-radius:4px;display:block">` : '';
+      return `<div class="rake-equip-btn" style="cursor:pointer" data-pack-idx="${pi.idx}">${img}<div style="font-size:10px;color:var(--text,#e0e0e0);margin-top:4px;max-width:80px;word-break:break-word">${pi.name}</div></div>`;
+    }).join('')}</div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  box.querySelectorAll('[data-pack-idx]').forEach(el => {
+    el.addEventListener('click', () => {
+      overlay.remove();
+      onChoice(parseInt(el.dataset.packIdx));
+    });
+  });
 }
 
 // Called when clicking a pack slot during placement mode.
@@ -1653,7 +1770,17 @@ function applyState(state) {
     document.getElementById('winner-text').textContent =
       `${winner ? winner.name : 'A player'} has defeated The Werbler!`;
     document.getElementById('winner-modal').classList.remove('hidden');
+    // Achievement: Victory (defeat the Werbler)
+    _checkAchievement('victory');
+    // Achievement: multiplayer wins
+    if (state.players.length > 1) {
+      _checkAchievement('champion');
+    }
   }
+  // Achievement: miniboss1 defeated
+  const curP = state.players.find(p => p.is_current);
+  if (curP && curP.miniboss1_defeated) _checkAchievement('a_strong_start');
+  if (curP && curP.miniboss2_defeated) _checkAchievement('getting_closer');
 }
 // ================================================================ CARD PREVIEW TOOLTIP
 let _previewEl = null;
@@ -2013,8 +2140,8 @@ function _renderPreFightScene(combat, state) {
           </button>
         </div>` : ''}
         <div class="battle-actions">
-          ${swiftnessFleeBtnHtml}
           <button class="btn-primary btn-fight" onclick="doFight()">&#x2694; Fight!</button>
+          ${swiftnessFleeBtnHtml}
           ${fleeBtnHtml}
         </div>
       </div>
@@ -3990,32 +4117,40 @@ function _showFairyKingReveal(data) {
   const tier = _pendingMysteryEvent?.tier || 1;
   const beggarImg = `/images/Events/Beggar Tier ${tier}.png`;
   const fkImg = `/images/Events/Fairy King Tier ${tier}.png`;
-  // Start with the beggar image, then transform — no "thank you" message on 3rd gift
+
+  // Step 1: Beggar says thank you
   overlay.innerHTML = `
     <div class="battle-bg" style="background-image:url('${beggarImg}')"></div>
     <div class="battle-content mystery-fullscreen">
-      <div class="mystery-fs-inner" id="fk-reveal-inner">
+      <div class="mystery-fs-inner">
         <h2 class="mystery-fs-title">The Beggar</h2>
+        <div class="mystery-speech-bubble"><p>"Thank you. Now you will see my true form…"</p></div>
+        <div class="mystery-btn-row">
+          <button class="btn-primary" id="fk-huh-btn">Huh?</button>
+        </div>
       </div>
     </div>`;
   overlay.classList.remove('hidden');
-  // Transform to Fairy King after a brief pause
-  setTimeout(() => {
+
+  document.getElementById('fk-huh-btn').onclick = () => {
+    // Step 2: Beggar transforms into the Fairy King
     const bgEl = overlay.querySelector('.battle-bg');
-    const titleEl = document.querySelector('#fk-reveal-inner .mystery-fs-title');
     if (bgEl) { bgEl.classList.add('fk-reveal-flash'); bgEl.style.backgroundImage = `url('${fkImg}')`; }
-    if (titleEl) titleEl.textContent = 'The Fairy King';
-    const inner = document.getElementById('fk-reveal-inner');
-    if (inner) {
-      inner.insertAdjacentHTML('beforeend', `<p class="mystery-fs-desc" style="font-style:italic">"You are very kind. Your generosity shall be rewarded."</p>`);
-    }
-    // After another delay, show item choices
-    setTimeout(() => {
+    overlay.querySelector('.mystery-fs-inner').innerHTML = `
+      <h2 class="mystery-fs-title">The Fairy King</h2>
+      <div class="mystery-speech-bubble"><p style="font-style:italic">"You are very kind. Your generosity shall be rewarded."</p></div>
+      <div class="mystery-btn-row">
+        <button class="btn-primary" id="fk-reward-prompt-btn">Reward?</button>
+      </div>`;
+
+    document.getElementById('fk-reward-prompt-btn').onclick = () => {
+      // Step 3: Show item choices
       const items = data.reward_items || [];
-      const inner2 = document.getElementById('fk-reveal-inner');
-      if (!inner2) return;
       if (items.length === 0) {
-        inner2.insertAdjacentHTML('beforeend', `<div class="mystery-btn-row"><button class="btn-primary" onclick="_closeMysteryResult()">Continue</button></div>`);
+        overlay.querySelector('.mystery-fs-inner').innerHTML = `
+          <h2 class="mystery-fs-title">The Fairy King</h2>
+          <p class="mystery-info">No items available.</p>
+          <div class="mystery-btn-row"><button class="btn-primary" onclick="_closeMysteryResult()">Continue</button></div>`;
         return;
       }
       const itemsHtml = items.map((item, i) => {
@@ -4024,14 +4159,15 @@ function _showFairyKingReveal(data) {
           ${img}<div class="mystery-item-label">${item.name} (+${item.strength_bonus})</div>
         </div>`;
       }).join('');
-      inner2.insertAdjacentHTML('beforeend', `
+      overlay.querySelector('.mystery-fs-inner').innerHTML = `
+        <h2 class="mystery-fs-title">The Fairy King</h2>
         <p class="mystery-info" style="margin-top:16px">Choose your reward:</p>
         <div class="mystery-item-grid">${itemsHtml}</div>
         <div class="mystery-btn-row">
           <button class="btn-primary" id="fk-reward-btn" onclick="_resolveFairyKingReward()" disabled>Take Item</button>
-        </div>`);
-    }, 2500);
-  }, 2000);
+        </div>`;
+    };
+  };
 }
 
 let _fkRewardIdx = -1;
@@ -4074,6 +4210,9 @@ async function _resolveFairyKingReward() {
     await new Promise(resolve => {
       document.getElementById('fk-farewell-btn').onclick = () => resolve();
     });
+    // Hide the battle-overlay BEFORE showing the chest modal so the inventory
+    // placement popup (z-index 250) is not blocked behind it (z-index 400).
+    overlay.classList.add('hidden');
     _pendingMysteryEvent = null;
     if (data.phase === 'offer_chest') {
       _pendingOfferData = data.offer;
@@ -4213,3 +4352,316 @@ function _showHeroAnimationForPlayer(state, animType, onEnd) {
 
 // ================================================================ INIT
 window.addEventListener('DOMContentLoaded', initSetup);
+
+// ================================================================ DEVICE ID
+function _initDeviceId() {
+  let id = localStorage.getItem('werblers_device_id');
+  if (!id) {
+    id = 'dev_' + crypto.randomUUID();
+    localStorage.setItem('werblers_device_id', id);
+  }
+  _deviceId = id;
+}
+
+// ================================================================ PROFILE SCREEN
+async function _loadProfileScreen() {
+  const resp = await fetch('/api/profiles?device_id=' + encodeURIComponent(_deviceId));
+  const data = await resp.json();
+  const profiles = data.profiles || [];
+  if (profiles.length === 0) {
+    // Show create section
+    document.getElementById('profile-create-section').classList.remove('hidden');
+    document.getElementById('profile-select-section').classList.add('hidden');
+  } else {
+    // Show select section
+    _renderProfileList(profiles);
+    document.getElementById('profile-create-section').classList.add('hidden');
+    document.getElementById('profile-select-section').classList.remove('hidden');
+  }
+  document.getElementById('profile-screen').classList.remove('hidden');
+  document.getElementById('main-menu-screen').classList.add('hidden');
+  document.getElementById('setup-screen').classList.add('hidden');
+  document.getElementById('game-screen').classList.add('hidden');
+  document.getElementById('game-side-buttons').classList.add('hidden');
+}
+
+function _renderProfileList(profiles) {
+  const list = document.getElementById('profile-list');
+  list.innerHTML = '';
+  for (const p of profiles) {
+    const btn = document.createElement('button');
+    btn.className = 'btn-profile';
+    btn.textContent = p.name;
+    btn.addEventListener('click', () => selectProfile(p));
+    list.appendChild(btn);
+  }
+}
+
+function showCreateProfile() {
+  document.getElementById('profile-create-section').classList.remove('hidden');
+  document.getElementById('profile-select-section').classList.add('hidden');
+}
+
+async function createProfile() {
+  const nameInput = document.getElementById('profile-name-input');
+  const name = nameInput.value.trim();
+  if (!name) return;
+  const resp = await fetch('/api/profiles', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_id: _deviceId, name }),
+  });
+  const data = await resp.json();
+  nameInput.value = '';
+  selectProfile(data.profile);
+}
+
+function selectProfile(profile) {
+  _profileId = profile.id;
+  _profileName = profile.name;
+  // Go to main menu
+  document.getElementById('profile-screen').classList.add('hidden');
+  document.getElementById('main-menu-screen').classList.remove('hidden');
+  document.getElementById('menu-profile-name').textContent = 'Welcome, ' + _profileName + '!';
+}
+
+function changeProfile() {
+  _profileId = null;
+  _profileName = '';
+  _loadProfileScreen();
+}
+
+function exitGame() {
+  // Return to profile selection
+  _profileId = null;
+  _profileName = '';
+  _loadProfileScreen();
+}
+
+// ================================================================ MAIN MENU
+function goToNewGame() {
+  document.getElementById('main-menu-screen').classList.add('hidden');
+  document.getElementById('setup-screen').classList.remove('hidden');
+  setNumPlayers(1);
+}
+
+// ================================================================ SAVE / LOAD MODAL
+function openSaveLoadModal() {
+  _saveLoadMode = 'save';
+  _selectedSlot = null;
+  document.getElementById('saveload-modal').classList.remove('hidden');
+  _refreshSaveSlots();
+}
+
+function closeSaveLoadModal() {
+  document.getElementById('saveload-modal').classList.add('hidden');
+}
+
+function setSaveLoadMode(mode) {
+  _saveLoadMode = mode;
+  _selectedSlot = null;
+  document.querySelectorAll('.saveload-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === mode));
+  const btn = document.getElementById('saveload-confirm-btn');
+  btn.textContent = mode === 'save' ? 'Save' : 'Load';
+  btn.disabled = true;
+  _refreshSaveSlots();
+}
+
+async function _refreshSaveSlots() {
+  if (!_profileId) return;
+  const resp = await fetch('/api/saves?profile_id=' + _profileId);
+  const data = await resp.json();
+  _savesData = data.saves || [];
+  _renderSaveSlots('saveload-slots');
+}
+
+function _renderSaveSlots(containerId) {
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  const isMenuLoad = containerId === 'menu-load-slots';
+  for (let i = 1; i <= 10; i++) {
+    const save = _savesData.find(s => s.slot_number === i);
+    const slot = document.createElement('div');
+    slot.className = 'save-slot' + (_selectedSlot === i ? ' selected' : '');
+    if (save) {
+      const dt = new Date(save.saved_at);
+      const timeStr = dt.toLocaleString();
+      slot.innerHTML = `<span class="slot-label">Slot ${i}</span>
+        <span class="slot-info">${save.hero_names} &bull; ${save.num_players}P &bull; Turn ${save.turn_number}</span>
+        <span class="slot-time">${timeStr}</span>`;
+    } else {
+      slot.innerHTML = `<span class="slot-label">Slot ${i}</span><span class="slot-info slot-empty">— Empty —</span>`;
+    }
+    slot.addEventListener('click', () => {
+      _selectedSlot = i;
+      const btnId = isMenuLoad ? 'menu-load-btn' : 'saveload-confirm-btn';
+      const btn = document.getElementById(btnId);
+      // For load mode, only enable if slot has data
+      if ((_saveLoadMode === 'load' || isMenuLoad) && !save) {
+        btn.disabled = true;
+      } else {
+        btn.disabled = false;
+      }
+      container.querySelectorAll('.save-slot').forEach(s => s.classList.remove('selected'));
+      slot.classList.add('selected');
+    });
+    container.appendChild(slot);
+  }
+}
+
+async function confirmSaveLoad() {
+  if (_selectedSlot === null) return;
+  if (_saveLoadMode === 'save') {
+    // Check if slot is occupied
+    const existing = _savesData.find(s => s.slot_number === _selectedSlot);
+    if (existing) {
+      // Show overwrite confirmation
+      document.getElementById('overwrite-modal').classList.remove('hidden');
+      return;
+    }
+    await _doSave();
+  } else {
+    await _doLoad();
+  }
+}
+
+async function confirmOverwrite(yes) {
+  document.getElementById('overwrite-modal').classList.add('hidden');
+  if (yes) await _doSave();
+}
+
+async function _doSave() {
+  const resp = await fetch('/api/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    closeSaveLoadModal();
+  }
+}
+
+async function _doLoad() {
+  const resp = await fetch('/api/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    closeSaveLoadModal();
+    // Make sure game screen is visible
+    document.getElementById('setup-screen').classList.add('hidden');
+    document.getElementById('main-menu-screen').classList.add('hidden');
+    document.getElementById('profile-screen').classList.add('hidden');
+    document.getElementById('game-screen').classList.remove('hidden');
+    document.getElementById('game-side-buttons').classList.remove('hidden');
+    _boardBuilt = false;
+    viewingPlayerId = data.state.current_player_id;
+    applyState(data.state);
+    _resumeTierMusic(data.state);
+    await loadAndRenderAbilities();
+  }
+}
+
+// ================================================================ LOAD FROM MAIN MENU
+async function openLoadFromMenu() {
+  _selectedSlot = null;
+  _saveLoadMode = 'load';
+  const resp = await fetch('/api/saves?profile_id=' + _profileId);
+  const data = await resp.json();
+  _savesData = data.saves || [];
+  _renderSaveSlots('menu-load-slots');
+  document.getElementById('menu-load-modal').classList.remove('hidden');
+}
+
+function closeMenuLoadModal() {
+  document.getElementById('menu-load-modal').classList.add('hidden');
+}
+
+async function menuLoadGame() {
+  if (_selectedSlot === null) return;
+  const resp = await fetch('/api/load', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, slot_number: _selectedSlot }),
+  });
+  const data = await resp.json();
+  if (data.ok) {
+    closeMenuLoadModal();
+    document.getElementById('main-menu-screen').classList.add('hidden');
+    document.getElementById('game-screen').classList.remove('hidden');
+    document.getElementById('game-side-buttons').classList.remove('hidden');
+    _boardBuilt = false;
+    viewingPlayerId = data.state.current_player_id;
+    applyState(data.state);
+    _resumeTierMusic(data.state);
+    await loadAndRenderAbilities();
+  }
+}
+
+// ================================================================ ACHIEVEMENTS
+async function openAchievementsModal() {
+  if (!_profileId) return;
+  const resp = await fetch('/api/achievements?profile_id=' + _profileId);
+  const data = await resp.json();
+  const list = document.getElementById('achievements-list');
+  list.innerHTML = '';
+  for (const a of (data.achievements || [])) {
+    const row = document.createElement('div');
+    row.className = 'achievement-row' + (a.achieved ? ' achieved' : '');
+    row.innerHTML = `<span class="achievement-check">${a.achieved ? '✅' : '⬜'}</span>
+                     <span class="achievement-desc">${a.description}</span>`;
+    list.appendChild(row);
+  }
+  document.getElementById('achievements-modal').classList.remove('hidden');
+}
+
+function closeAchievementsModal() {
+  document.getElementById('achievements-modal').classList.add('hidden');
+}
+
+// Track which achievements we've already triggered this session to avoid duplicates
+let _achievementsTriggeredThisSession = new Set();
+
+async function _checkAchievement(key) {
+  if (!_profileId) return;
+  if (_achievementsTriggeredThisSession.has(key)) return;
+  _achievementsTriggeredThisSession.add(key);
+  const resp = await fetch('/api/achievements', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profile_id: _profileId, achievement: key }),
+  });
+  const data = await resp.json();
+  if (data.newly_granted) {
+    // Find the description
+    const ach = (data.achievements || []).find(a => a.key === key);
+    const desc = ach ? ach.description : key;
+    _pendingAchievements.push(desc);
+    _showNextAchievementPopup();
+    // Check if total_victory was also just granted
+    const totalV = (data.achievements || []).find(a => a.key === 'total_victory' && a.achieved);
+    if (totalV && !_achievementsTriggeredThisSession.has('total_victory_shown')) {
+      _achievementsTriggeredThisSession.add('total_victory_shown');
+      const tvDesc = (data.achievements || []).find(a => a.key === 'total_victory');
+      if (tvDesc) _pendingAchievements.push(tvDesc.description);
+    }
+  }
+}
+
+function _showNextAchievementPopup() {
+  if (_achievementPopupActive || _pendingAchievements.length === 0) return;
+  _achievementPopupActive = true;
+  const desc = _pendingAchievements.shift();
+  document.getElementById('achievement-popup-name').textContent = desc;
+  document.getElementById('achievement-popup').classList.remove('hidden');
+}
+
+function dismissAchievementPopup() {
+  document.getElementById('achievement-popup').classList.add('hidden');
+  _achievementPopupActive = false;
+  // Show next if queued
+  _showNextAchievementPopup();
+}
