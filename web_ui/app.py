@@ -2,10 +2,11 @@
 from __future__ import annotations
 import os
 import sys
+import uuid
 from typing import Optional
 # Allow importing werblers_engine from parent directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_from_directory, session
 from werblers_engine.game import Game
 from werblers_engine.heroes import HEROES, HeroId
 from werblers_engine.types import TileType
@@ -14,6 +15,7 @@ from werblers_engine import effects as _fx
 from werblers_engine import database as db
 from werblers_engine.save_load import serialize_game, deserialize_game
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "werblers-dev-secret-key")
 
 # Initialise database tables on startup
 db.init_db()
@@ -21,9 +23,22 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMAGES_DIR = os.path.join(BASE_DIR, "Images")
 MUSIC_DIR  = os.path.join(BASE_DIR, "Music")
 VIDEOS_DIR = os.path.join(BASE_DIR, "Videos")
-_game: Optional[Game] = None
-_last_log: list[str] = []
-_pending_log: list[str] = []   # log lines from begin_move, prepended to resolve_offer log
+# Per-session game state: session_id -> {"game": Game, "last_log": list, "pending_log": list}
+_sessions: dict[str, dict] = {}
+
+
+def _get_state() -> dict:
+    """Return the mutable state dict for the current browser session.
+
+    Returns a dummy empty state if no game session exists yet (so callers
+    can safely check state["game"] is None without crashing).
+    """
+    sid = session.get("game_id")
+    if not sid or sid not in _sessions:
+        return {"game": None, "last_log": [], "pending_log": []}
+    return _sessions[sid]
+
+
 _TOKEN_MAP: dict[str, str] = {
     "BILLFOLD":  "Assorted UI Images/Billfold Token.png",
     "GREGORY":   "Assorted UI Images/Gregory Token.png",
@@ -89,21 +104,21 @@ def api_heroes():
     return jsonify(result)
 @app.route("/api/new_game", methods=["POST"])
 def api_new_game():
-    global _game, _last_log, _pending_log
     data: dict = request.get_json(force=True) or {}
     hero_id_strs: list[str] = data.get("hero_ids", [])
     num_players: int = len(hero_id_strs) if hero_id_strs else data.get("num_players", 1)
     seed: Optional[int] = data.get("seed", None)
     hero_ids = [HeroId[h] for h in hero_id_strs] if hero_id_strs else None
-    _game = Game(num_players=num_players, hero_ids=hero_ids, seed=seed)
-    for p in _game.players:
-        _game.draw_movement_cards(p)
-    _pending_log = []
-    _last_log = ["New game started!"]
+    game = Game(num_players=num_players, hero_ids=hero_ids, seed=seed)
+    for p in game.players:
+        game.draw_movement_cards(p)
+    sid = str(uuid.uuid4())
+    session["game_id"] = sid
+    _sessions[sid] = {"game": game, "last_log": ["New game started!"], "pending_log": []}
     return jsonify({"ok": True, "state": _build_state()})
 @app.route("/api/state")
 def api_state():
-    if _game is None:
+    if _get_state()["game"] is None:
         return jsonify({"error": "No game in progress"}), 400
     return jsonify(_build_state())
 # ------------------------------------------------------------------
@@ -112,6 +127,7 @@ def api_state():
 @app.route("/api/get_abilities")
 def api_get_abilities():
     """Return available 'you may' abilities for the current player."""
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     abilities = _game.get_available_abilities()
@@ -119,7 +135,8 @@ def api_get_abilities():
 @app.route("/api/begin_move", methods=["POST"])
 def api_begin_move():
     """Phase 1: play a movement card, reveal tile, pause if chest/shop."""
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     # Guard: reject if there's already an unresolved pending state
@@ -140,15 +157,15 @@ def api_begin_move():
     background = bg_map.get(_tile_level(moved_to) if moved_to else 1, bg_map[1])
     tile_scene = {"tile_type": tile_type, "background": background, "moved_to": moved_to}
     if result["phase"] in ("done", "combat"):
-        _pending_log = []
-        _last_log = log
+        _st["pending_log"] = []
+        _st["last_log"] = log
         combat_info = result.get("combat_info")
         if combat_info:
             combat_info = _enrich_combat_info(combat_info)
         return jsonify({"phase": result["phase"], "state": _build_state(), "combat_info": combat_info, "tile_scene": tile_scene})
     elif result["phase"] == "charlie_work":
-        _pending_log = log
-        _last_log = log
+        _st["pending_log"] = log
+        _st["last_log"] = log
         return jsonify({
             "phase":      "charlie_work",
             "level":      result.get("level", 1),
@@ -157,8 +174,8 @@ def api_begin_move():
             "log":        log,
         })
     elif result["phase"] == "mystery":
-        _pending_log = log
-        _last_log = log
+        _st["pending_log"] = log
+        _st["last_log"] = log
         me = result.get("mystery_event", {})
         img_name = me.get('image_name') or me['name']
         me["image"] = f"Events/{img_name} Tier {me['tier']}.png"
@@ -169,8 +186,8 @@ def api_begin_move():
             "tile_scene":    tile_scene,
         })
     else:
-        _pending_log = log
-        _last_log = log
+        _st["pending_log"] = log
+        _st["last_log"] = log
         raw_offer = result["offer"]
         enriched_items = [
             {**item, "card_image": _item_card_image_from_dict(item)}
@@ -186,15 +203,16 @@ def api_begin_move():
 @app.route("/api/resolve_charlie_work", methods=["POST"])
 def api_resolve_charlie_work():
     """Resolve the No More Charlie Work decision (phase == 'charlie_work')."""
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
     use_it: bool = bool(data.get("use_it", False))
     result = _game.resolve_charlie_work(use_it=use_it)
-    log = _pending_log + result.get("log", [])
-    _pending_log = []
-    _last_log = log
+    log = _st["pending_log"] + result.get("log", [])
+    _st["pending_log"] = []
+    _st["last_log"] = log
     combat_info = result.get("combat_info")
     if combat_info:
         combat_info = _enrich_combat_info(combat_info)
@@ -203,6 +221,7 @@ def api_resolve_charlie_work():
 @app.route("/api/use_ill_come_in_again", methods=["POST"])
 def api_use_ill_come_in_again():
     """Use I'll Come In Again / I See Everything: return current monster and draw a new one."""
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     result = _game.use_ill_come_in_again()
@@ -214,14 +233,15 @@ def api_use_ill_come_in_again():
 @app.route("/api/resolve_offer", methods=["POST"])
 def api_resolve_offer():
     """Phase 2: apply player item choices, complete the turn."""
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     choices: dict = request.get_json(force=True) or {}
     result = _game.resolve_offer(choices=choices)
-    combined_log = _pending_log + result.get("log", [])
-    _pending_log = combined_log
-    _last_log = combined_log
+    combined_log = _st["pending_log"] + result.get("log", [])
+    _st["pending_log"] = combined_log
+    _st["last_log"] = combined_log
     if result.get("phase") == "rake_it_in":
         # Rake It In pauses before the turn ends — enrich equips/shop items with card images
         equips = [
@@ -250,13 +270,8 @@ def api_resolve_offer():
             "state": _build_state(),
             "log": combined_log,
         })
-    _pending_log = []
+    _st["pending_log"] = []
     return jsonify({"phase": "done", "state": _build_state()})
-
-
-# ------------------------------------------------------------------
-# Mystery event resolution
-# ------------------------------------------------------------------
 @app.route("/api/resolve_mystery", methods=["POST"])
 def api_resolve_mystery():
     """Resolve a pending mystery event.
@@ -268,7 +283,6 @@ def api_resolve_mystery():
         smith_equip_index: int  (equipped item index for tier-3 smith enhancement)
     """
     import traceback as _tb
-    global _last_log, _pending_log
     try:
         return _api_resolve_mystery_inner()
     except Exception as exc:
@@ -277,7 +291,8 @@ def api_resolve_mystery():
         return jsonify({"error": f"Server error in resolve_mystery: {exc}\n\nTraceback:\n{tb}"}), 500
 
 def _api_resolve_mystery_inner():
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     po = _game._pending_offer
@@ -288,7 +303,7 @@ def _api_resolve_mystery_inner():
     event = po["event"]
     player = _game.current_player
     level = po["level"]
-    log: list[str] = po.get("log", _pending_log or [])
+    log: list[str] = po.get("log", _st["pending_log"] or [])
 
     from werblers_engine import mystery as _mys
 
@@ -303,8 +318,8 @@ def _api_resolve_mystery_inner():
         _game._pending_offer = None
         _game._finish_post_encounter(player, log)
         _game._advance_turn()
-        _pending_log = []
-        _last_log = log
+        _st["pending_log"] = []
+        _st["last_log"] = log
         return jsonify({
             "phase": "done",
             "prize_type": "skip",
@@ -361,8 +376,8 @@ def _api_resolve_mystery_inner():
             "moved_from": po["moved_from"], "moved_to": po["moved_to"],
             "card_played": po["card_played"], "tile_type": po["tile_type"],
         }
-        _last_log = log
-        _pending_log = log
+        _st["last_log"] = log
+        _st["pending_log"] = log
         return jsonify({
             "phase": "offer_chest",
             "event_id": event_id,
@@ -382,8 +397,8 @@ def _api_resolve_mystery_inner():
             "card_played": po["card_played"], "tile_type": po["tile_type"],
             "log": log,
         }
-        _last_log = log
-        _pending_log = log
+        _st["last_log"] = log
+        _st["pending_log"] = log
         return jsonify({
             "phase": "fairy_king_reveal",
             "mystery_result": result.get("label", ""),
@@ -396,8 +411,8 @@ def _api_resolve_mystery_inner():
         _game._pending_offer = None
         _game._finish_post_encounter(player, log)
         _game._advance_turn()
-        _pending_log = []
-        _last_log = log
+        _st["pending_log"] = []
+        _st["last_log"] = log
         return jsonify({
             "phase": "beggar_thank",
             "event_id": event_id,
@@ -408,7 +423,7 @@ def _api_resolve_mystery_inner():
 
     # Error results — Don't finish the turn; let the player retry
     if result.get("prize_type") == "error":
-        _last_log = log
+        _st["last_log"] = log
         return jsonify({"error": "Invalid selection — please try again.", "state": _build_state()}), 400
 
     # Otherwise (nothing, skip, trait, smith_enhance, gift_accepted, stolen)
@@ -416,8 +431,8 @@ def _api_resolve_mystery_inner():
     _game._pending_offer = None
     _game._finish_post_encounter(player, log)
     _game._advance_turn()
-    _pending_log = []
-    _last_log = log
+    _st["pending_log"] = []
+    _st["last_log"] = log
 
     # Build rich outcome payload so the frontend can display a proper outcome screen
     outcome: dict = {
@@ -462,7 +477,8 @@ def _item_to_dict_from_obj(item) -> dict:
 @app.route("/api/resolve_fairy_king_reward", methods=["POST"])
 def api_resolve_fairy_king_reward():
     """Player chooses one of the 3 T3 items offered by the Fairy King."""
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     po = _game._pending_offer
@@ -477,7 +493,7 @@ def api_resolve_fairy_king_reward():
 
     player = _game.current_player
     chosen = reward_items[choice]
-    log: list[str] = po.get("log", _pending_log or [])
+    log: list[str] = po.get("log", _st["pending_log"] or [])
 
     # Set up item placement like a chest offer
     _game._pending_offer = {
@@ -488,8 +504,8 @@ def api_resolve_fairy_king_reward():
         "card_played": po["card_played"], "tile_type": po["tile_type"],
     }
     log.append(f"The Fairy King bestows: {chosen.name}!")
-    _last_log = log
-    _pending_log = log
+    _st["last_log"] = log
+    _st["pending_log"] = log
     return jsonify({
         "phase": "offer_chest",
         "mystery_result": f"Fairy King reward: {chosen.name}",
@@ -509,7 +525,8 @@ def api_resolve_rake_it_in():
         second_item_choice : int (shop only — which remaining item to take)
         placement       : "equip"|"pack"  (for bonus item)
     """
-    global _last_log, _pending_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -525,9 +542,9 @@ def api_resolve_rake_it_in():
         second_item_choice=second_item_choice,
         placement_choices=placement_choices,
     )
-    combined_log = _pending_log + result.get("log", [])
-    _pending_log = []
-    _last_log = combined_log
+    combined_log = _st["pending_log"] + result.get("log", [])
+    _st["pending_log"] = []
+    _st["last_log"] = combined_log
     bonus = result.get("bonus_item")
     if bonus:
         bonus["card_image"] = _item_card_image_from_dict(bonus)
@@ -542,6 +559,7 @@ def api_equip_from_pack():
       ``to_pack`` -- move the displaced item to the pack instead of discarding.
       ``displaced_actions`` -- list of dicts with {action: 'discard'|'to_pack', discard_pack_index: int} for each displaced item.
     """
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -672,6 +690,7 @@ def api_crossroads_discard():
         equip_sources : list of {source: "equip_helmet"|..., index: int}
     Returns updated state; also stores discarded items in pending_combat for bonus draws on win.
     """
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     if _game._pending_combat is None:
@@ -741,6 +760,7 @@ def api_manage_item():
         source  : "equip_helmet" | "equip_chest" | "equip_leg" | "equip_weapon" | "pack"
         index   : integer index within that slot list
     """
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -811,6 +831,7 @@ def api_manage_item():
 @app.route("/api/discard_consumable", methods=["POST"])
 def api_discard_consumable():
     """Discard a consumable from the player's consumables list."""
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -833,7 +854,8 @@ def api_use_pack_consumable():
         pack_index       : int  (index in player.pack)
         target_player_id : int  (optional, for give_curse)
     """
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     import copy as _copy
@@ -873,7 +895,7 @@ def api_use_pack_consumable():
         player.pending_trait_items.extend(trait_items)
         player.pending_trait_minions.extend(trait_minions)
         _fx.refresh_tokens(player)
-        _last_log = trait_log
+        _st["last_log"] = trait_log
         return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
                         "monster_name": drawn.name,
                         "monster_card_image": _monster_card_image(drawn.name),
@@ -907,7 +929,7 @@ def api_use_pack_consumable():
         target.curses.append(curse)
         _fx.on_curse_gained(target, curse, curse_log, None, [p for p in _game.players if p is not target], None)
         _fx.refresh_tokens(target)
-        _last_log = curse_log
+        _st["last_log"] = curse_log
         return jsonify({"ok": True, "phase": "curse_given", "curse_name": curse.name,
                         "target_name": target.name, "monster_name": drawn.name,
                         "monster_card_image": _monster_card_image(drawn.name),
@@ -925,7 +947,8 @@ def api_use_consumable():
     an active pre-fight phase.  Overworld effects (gain_trait, give_curse) work
     at any time.
     """
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -980,7 +1003,7 @@ def api_use_consumable():
                 "ill_come_in_again_available": has_reroll,
             }
             _game._last_combat_info = combat_info
-            _last_log = log
+            _st["last_log"] = log
             return jsonify({"ok": True, "phase": "combat", "state": _build_state(),
                             "combat_info": _enrich_combat_info(combat_info)})
         # During combat: capture the current monster
@@ -1004,7 +1027,7 @@ def api_use_consumable():
         _game._pending_combat = None
         _game._finish_post_encounter(player, log)
         _game._advance_turn()
-        _last_log = log
+        _st["last_log"] = log
         return jsonify({"ok": True, "phase": "captured", "monster_name": monster.name, "state": _build_state()})
 
     if consumable.effect_id == "" and consumable.strength_bonus > 0:
@@ -1045,7 +1068,7 @@ def api_use_consumable():
         player.pending_trait_items.extend(trait_items)
         player.pending_trait_minions.extend(trait_minions)
         _fx.refresh_tokens(player)
-        _last_log = trait_log
+        _st["last_log"] = trait_log
         return jsonify({"ok": True, "phase": "trait_gained", "trait_name": trait.name,
                         "monster_name": drawn.name,
                         "monster_card_image": _monster_card_image(drawn.name),
@@ -1085,7 +1108,7 @@ def api_use_consumable():
         curse_log.append(f"{target.name} received curse '{curse.name}'!")
         _fx.on_curse_gained(target, curse, curse_log, None, [p for p in _game.players if p is not target], None)
         _fx.refresh_tokens(target)
-        _last_log = curse_log
+        _st["last_log"] = curse_log
         return jsonify({"ok": True, "phase": "curse_given", "curse_name": curse.name,
                         "target_name": target.name,
                         "monster_name": drawn.name,
@@ -1112,7 +1135,8 @@ def api_bystander_consumable():
     Body: {player_id: int, consumable_index: int | null, skip: bool}
     The caller must be in the nearby_queue list of the pending combat.
     """
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     if _game._pending_combat is None:
@@ -1158,7 +1182,7 @@ def api_bystander_consumable():
                 if _game._last_combat_info:
                     _game._last_combat_info["monster_strength"] = monster.strength
 
-    _last_log = log
+    _st["last_log"] = log
 
     # Return updated combat info with remaining queue
     combat_info = _enrich_combat_info(dict(_game._last_combat_info)) if _game._last_combat_info else None
@@ -1183,7 +1207,8 @@ def api_bystander_consumable():
 @app.route("/api/swiftness_flee", methods=["POST"])
 def api_swiftness_flee():
     """Swiftness trait: flee from pending monster/miniboss at no cost (no position change)."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     try:
         if _game is None:
             return jsonify({"error": "No game in progress"}), 400
@@ -1204,7 +1229,7 @@ def api_swiftness_flee():
         _game._prefight_monster_str_bonus = 0
         _game._finish_post_encounter(player, log)
         _game._advance_turn()
-        _last_log = log
+        _st["last_log"] = log
         return jsonify({"phase": "done", "state": _build_state()})
     except Exception as exc:
         import traceback
@@ -1215,14 +1240,15 @@ def api_swiftness_flee():
 @app.route("/api/flee", methods=["POST"])
 def api_flee():
     """Billfold: Fly, you dummy! — flee the pending monster or miniboss combat."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     try:
         if _game is None:
             return jsonify({"error": "No game in progress"}), 400
         result = _game.flee_monster()
         if "error" in result:
             return jsonify(result), 400
-        _last_log = result.get("log", [])
+        _st["last_log"] = result.get("log", [])
         return jsonify({"phase": "done", "state": _build_state()})
     except Exception as exc:
         import traceback
@@ -1234,7 +1260,8 @@ def api_flee():
 @app.route("/api/fight", methods=["POST"])
 def api_fight():
     """Resolve the pending monster combat."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     try:
         if _game is None:
             return jsonify({"error": "No game in progress"}), 400
@@ -1242,7 +1269,7 @@ def api_fight():
             return jsonify({"error": "No pending combat"}), 400
         from_mystery = _game._pending_combat.get("from_mystery", False)
         result = _game.fight()
-        _last_log = result.get("log", [])
+        _st["last_log"] = result.get("log", [])
         combat_info = result.get("combat_info")
         if combat_info:
             combat_info = _enrich_combat_info(combat_info)
@@ -1257,14 +1284,15 @@ def api_fight():
 @app.route("/api/use_eight_lives", methods=["POST"])
 def api_use_eight_lives():
     """Immediately use Eight Lives to remove a curse."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
     curse_index = int(data.get("curse_index", 0))
     result = _game.use_eight_lives(curse_index)
     if result.get("log"):
-        _last_log = _last_log + result["log"]
+        _st["last_log"] = _st["last_log"] + result["log"]
     return jsonify({"ok": result["ok"], "state": _build_state()})
 
 @app.route("/api/place_trait_item", methods=["POST"])
@@ -1275,6 +1303,7 @@ def api_place_trait_item():
         placement_choices : same placement dict as resolve_offer uses
         player_id         : optional, target a specific player (for Rake It In after turn advance)
     """
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -1301,6 +1330,7 @@ def api_place_trait_item():
 @app.route("/api/release_monster", methods=["POST"])
 def api_release_monster():
     """Release a captured monster from the player's pack."""
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -1314,7 +1344,8 @@ def api_release_monster():
 @app.route("/api/summon_monster", methods=["POST"])
 def api_summon_monster():
     """Summon a captured monster as an ENEMY, triggering a fight."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -1358,7 +1389,7 @@ def api_summon_monster():
         "ill_come_in_again_available": has_reroll,
     }
     _game._last_combat_info = combat_info
-    _last_log = log
+    _st["last_log"] = log
     return jsonify({"ok": True, "phase": "combat", "state": _build_state(),
                     "combat_info": _enrich_combat_info(combat_info)})
 
@@ -1369,7 +1400,8 @@ def api_summon_monster():
 @app.route("/api/resolve_minion", methods=["POST"])
 def api_resolve_minion():
     """Replace an existing minion with a pending one, or discard the pending minion."""
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -1402,7 +1434,7 @@ def api_resolve_minion():
         _fx_mod.on_minion_gained(player, minion, log)
         log.append(f"  {minion.name} added to minions.")
 
-    _last_log = log
+    _st["last_log"] = log
     return jsonify({"ok": True, "state": _build_state()})
 
 
@@ -1411,7 +1443,8 @@ def api_resolve_minion():
 # ------------------------------------------------------------------
 @app.route("/api/play_turn", methods=["POST"])
 def api_play_turn():
-    global _last_log
+    _st = _get_state()
+    _game = _st["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data: dict = request.get_json(force=True) or {}
@@ -1419,7 +1452,7 @@ def api_play_turn():
     flee: bool = bool(data.get("flee", False))
     shop_choice: int = data.get("shop_choice", 0)
     result = _game.play_turn(card_index=card_index, flee=flee, shop_choice=shop_choice)
-    _last_log = result.encounter_log
+    _st["last_log"] = result.encounter_log
     return jsonify({"ok": True, "state": _build_state()})
 # ---------------------------------------------------------------------------
 # State serialisation helpers
@@ -1512,6 +1545,7 @@ def _werbler_card_image(name: str) -> str:
 
 def _enrich_combat_info(info: dict) -> dict:
     """Add card image path and player gear to combat info for the frontend battle scene."""
+    _game = _get_state()["game"]
     category = info.get("category", "monster")
     name = info.get("monster_name", "")
     if category == "miniboss":
@@ -1630,7 +1664,8 @@ def _ser_curse(c) -> dict:
             "strength_bonus": c.strength_bonus,
             "description": C.CURSE_DESCRIPTIONS.get(c.name, "")}
 def _build_state() -> dict:
-    g = _game
+    _st = _get_state()
+    g = _st["game"]
     current = g.current_player
     board_data = [
         {
@@ -1699,7 +1734,7 @@ def _build_state() -> dict:
         "winner":            g.winner,
         "board":             board_data,
         "players":           players_data,
-        "log":               _last_log,
+        "log":               _st["last_log"],
         "has_pending_offer": g._pending_offer is not None,
         "has_pending_combat": g._pending_combat is not None and g._pending_combat.get("type") != "awaiting_charlie_work",
         "has_pending_charlie_work": g._pending_combat is not None and g._pending_combat.get("type") == "awaiting_charlie_work",
@@ -1736,7 +1771,7 @@ def api_list_saves():
 
 @app.route("/api/save", methods=["POST"])
 def api_save_game():
-    global _game
+    _game = _get_state()["game"]
     if _game is None:
         return jsonify({"error": "No game in progress"}), 400
     data = request.get_json(force=True) or {}
@@ -1761,7 +1796,6 @@ def api_save_game():
 
 @app.route("/api/load", methods=["POST"])
 def api_load_game():
-    global _game, _last_log, _pending_log
     data = request.get_json(force=True) or {}
     profile_id = data.get("profile_id")
     slot_number = data.get("slot_number")
@@ -1770,9 +1804,10 @@ def api_load_game():
     game_json = db.load_save(int(profile_id), int(slot_number))
     if game_json is None:
         return jsonify({"error": "Save not found"}), 404
-    _game = deserialize_game(game_json)
-    _pending_log = []
-    _last_log = ["Game loaded!"]
+    game = deserialize_game(game_json)
+    sid = str(uuid.uuid4())
+    session["game_id"] = sid
+    _sessions[sid] = {"game": game, "last_log": ["Game loaded!"], "pending_log": []}
     return jsonify({"ok": True, "state": _build_state()})
 
 @app.route("/api/achievements", methods=["GET"])

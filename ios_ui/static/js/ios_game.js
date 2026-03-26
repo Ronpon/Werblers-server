@@ -458,7 +458,8 @@ function updateMovementHand() {
   hand.innerHTML = p.movement_hand.map((v, i) => {
     const dispVal = v + heroBonus;
     const imgVal = Math.min(Math.max(dispVal, 1), 5);
-    return `<div class="mv-card" onclick="promptDirection(${i}, ${dispVal})"><img class="mv-card-img" src="/images/Movement/Movement Card ${imgVal}.png" alt="${dispVal}"></div>`;
+    const badge = (dispVal !== imgVal) ? `<span class="mv-card-badge">${dispVal}</span>` : '';
+    return `<div class="mv-card" onclick="promptDirection(${i}, ${dispVal})"><img class="mv-card-img" src="/images/Movement/Movement Card ${imgVal}.png" alt="${dispVal}">${badge}</div>`;
   }).join('');
 }
 
@@ -560,17 +561,87 @@ function renderAbilities(abilities) {
     return;
   }
   section.innerHTML = abilities.map(ab => {
-    const isPreCard = ab.timing === 'pre_card';
-    let toggleHtml = '';
-    if (isPreCard && ab.type === 'toggle') {
+    let actionHtml = '';
+    if (ab.type === 'instant_select_curse') {
+      const curses = ab.curses || [];
+      if (curses.length === 1) {
+        actionHtml = `<button class="btn-primary ability-instant-btn" onclick="useEightLives(0)">Use: Remove "${_esc(curses[0])}"</button>`;
+      } else if (curses.length > 1) {
+        const opts = curses.map((c, i) => `<option value="${i}">${_esc(c)}</option>`).join('');
+        actionHtml = `<div class="ability-select-row">
+          <select class="ability-select" id="eight-lives-sel-${ab.id}">${opts}</select>
+          <button class="btn-primary ability-instant-btn" onclick="useEightLives(parseInt(document.getElementById('eight-lives-sel-${ab.id}').value))">Use Eight Lives</button>
+        </div>`;
+      }
+    } else if (ab.type === 'activate') {
+      const rawVal = ab.value || 0;
+      actionHtml = `<button class="btn-primary ability-instant-btn" onclick="activateWheelies(${rawVal})">🛞 Use Wheelies!</button>`;
+    } else if (ab.type === 'toggle') {
       const cur = abilityChoices[ab.id] !== undefined ? abilityChoices[ab.id] : ab.default;
-      toggleHtml = `<div class="ability-toggle">
+      actionHtml = `<div class="ability-toggle">
         <button class="ability-btn ${cur ? 'active' : 'inactive'}" onclick="toggleAbility('${ab.id}', true)">On</button>
         <button class="ability-btn ${!cur ? 'active' : 'inactive'}" onclick="toggleAbility('${ab.id}', false)">Off</button>
       </div>`;
+    } else if (ab.type === 'select_number') {
+      const cur = abilityChoices[ab.id];
+      const checked = cur !== undefined;
+      const opts = (ab.options || []).map(n => `<option value="${n}" ${cur?.reduction === n ? 'selected' : ''}>Reduce by ${n}</option>`).join('');
+      actionHtml = `<div class="ability-check-row">
+        <label class="ability-check-label"><input type="checkbox" ${checked ? 'checked' : ''} onchange="onIosAbilityCheck(this,'${ab.id}','reduction',true)"> Activate</label>
+        <select class="ability-select" id="ab-sel-${ab.id}" onchange="onIosAbilitySelectField('${ab.id}','reduction',true)">${opts}</select>
+      </div>`;
+    } else if (ab.type === 'select_trait') {
+      const cur = abilityChoices[ab.id];
+      const checked = cur !== undefined;
+      const opts = (ab.traits || []).map((t, i) => `<option value="${i}" ${cur?.trait_index === i ? 'selected' : ''}>${_esc(t)}</option>`).join('');
+      actionHtml = `<div class="ability-check-row">
+        <label class="ability-check-label"><input type="checkbox" ${checked ? 'checked' : ''} onchange="onIosAbilityCheck(this,'${ab.id}','trait_index',true)"> Activate</label>
+        <select class="ability-select" id="ab-sel-${ab.id}" onchange="onIosAbilitySelectField('${ab.id}','trait_index',true)">${opts}</select>
+      </div>`;
+    } else if (ab.type === 'select_equip') {
+      const cur = abilityChoices[ab.id];
+      const checked = cur !== undefined;
+      const opts = (ab.equips || []).map((e, i) => `<option value="${i}" ${cur?.equip_index === i ? 'selected' : ''}>${_esc(e)}</option>`).join('');
+      actionHtml = `<div class="ability-check-row">
+        <label class="ability-check-label"><input type="checkbox" ${checked ? 'checked' : ''} onchange="onIosAbilityCheck(this,'${ab.id}','equip_index',true)"> Activate</label>
+        <select class="ability-select" id="ab-sel-${ab.id}" onchange="onIosAbilitySelectField('${ab.id}','equip_index',true)">${opts}</select>
+      </div>`;
+    } else if (ab.type === 'select_player_minion') {
+      const cur = abilityChoices[ab.id];
+      const checked = cur !== undefined;
+      const opts = (ab.targets || []).map(t => `<option value="${t.player_id}" ${String(cur?.target_player_id) === String(t.player_id) ? 'selected' : ''}>${_esc(t.name)}</option>`).join('');
+      actionHtml = `<div class="ability-check-row">
+        <label class="ability-check-label"><input type="checkbox" ${checked ? 'checked' : ''} onchange="onIosAbilityCheck(this,'${ab.id}','target_player_id',false)"> Activate</label>
+        <select class="ability-select" id="ab-sel-${ab.id}" onchange="onIosAbilitySelectField('${ab.id}','target_player_id',false)">${opts}</select>
+      </div>`;
     }
-    return `<div class="ability-card"><div class="ability-name">${ab.label || ab.name || '?'}</div><div class="ability-desc">${ab.description || ''}</div>${toggleHtml}</div>`;
+    return `<div class="ability-card"><div class="ability-name">${ab.label || ab.name || '?'}</div><div class="ability-desc">${ab.description || ''}</div>${actionHtml}</div>`;
   }).join('');
+}
+
+function onIosAbilityCheck(el, id, field, isInt) {
+  if (!el.checked) { delete abilityChoices[id]; return; }
+  abilityChoices[id] = {};
+  const sel = document.getElementById(`ab-sel-${id}`);
+  if (sel) abilityChoices[id][field] = isInt ? parseInt(sel.value) : sel.value;
+}
+
+function onIosAbilitySelectField(id, field, isInt) {
+  const sel = document.getElementById(`ab-sel-${id}`);
+  if (!sel) return;
+  if (abilityChoices[id] && typeof abilityChoices[id] === 'object') {
+    abilityChoices[id][field] = isInt ? parseInt(sel.value) : sel.value;
+  }
+}
+
+function activateWheelies(rawVal) {
+  if (_moveInFlight) return;
+  const p = gameState && gameState.players.find(x => x.is_current);
+  if (!p) return;
+  const heroBonus = p.movement_card_bonus || 0;
+  const dispVal = rawVal + heroBonus;
+  abilityChoices['wheelies'] = true;
+  promptDirection(0, dispVal);
 }
 
 function toggleAbility(id, val) {
@@ -1603,13 +1674,16 @@ function _showEightLivesPrompt(data) {
   }
 }
 
-async function useEightLives() {
-  const resp = await fetch('/api/use_eight_lives', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+async function useEightLives(curseIndex) {
+  curseIndex = curseIndex !== undefined ? curseIndex : 0;
+  const resp = await fetch('/api/use_eight_lives', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({curse_index: curseIndex})});
   const data = await resp.json();
   if (data.error) { alert(data.error); return; }
-  if (data.state) { gameState = data.state; }
+  if (data.state) { gameState = data.state; applyState(data.state); }
   if (data.combat_info) {
     showBattleScene(data);
+  } else {
+    await loadAndRenderAbilities();
   }
 }
 
@@ -2495,6 +2569,8 @@ async function _postResolveMystery(body) {
       return;
     }
     const data = await resp.json();
+    // Save the player who encountered this event BEFORE the turn advances in the state
+    const mysteryPlayer = gameState?.players?.find(x => x.is_current) || null;
     if (data.state) { gameState = data.state; applyState(data.state); }
 
     const isWheel = _pendingMysteryEvent?.event_id === 'the_wheel';
@@ -2511,7 +2587,7 @@ async function _postResolveMystery(body) {
         _pendingOfferData = data.offer;
         document.getElementById('battle-overlay').classList.add('hidden');
         showChestModal(data.offer, {});
-      });
+      }, mysteryPlayer);
     } else if (data.phase === 'beggar_thank') {
       _showBeggarThankYou(data);
     } else if (data.phase === 'fairy_king_reveal') {
@@ -2520,13 +2596,13 @@ async function _postResolveMystery(body) {
       if (data.prize_type === 'skip') {
         _closeMysteryResult();
       } else if (isWheel) {
-        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, wheelFarewell, () => _closeMysteryResult()); });
+        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, wheelFarewell, () => _closeMysteryResult()); }, mysteryPlayer);
       } else if (isMysteryBox) {
-        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, boxFarewell, () => _closeMysteryResult()); });
+        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, boxFarewell, () => _closeMysteryResult()); }, mysteryPlayer);
       } else if (isBandits && data.prize_type === 'stolen') {
-        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, '"Thank you for your\u2026 heh\u2026 generosity."', () => _closeMysteryResult()); });
+        await _showMysteryOutcome(data, async () => { await _showCharacterFarewell(_pendingMysteryEvent, '"Thank you for your\u2026 heh\u2026 generosity."', () => _closeMysteryResult()); }, mysteryPlayer);
       } else {
-        await _showMysteryOutcome(data, () => _closeMysteryResult());
+        await _showMysteryOutcome(data, () => _closeMysteryResult(), mysteryPlayer);
       }
     }
   } catch (err) { console.error('resolve_mystery error:', err); }
@@ -2622,7 +2698,7 @@ function _getMysteryOutcomeContent(data) {
   return {title, outcomeText, quoteText};
 }
 
-async function _showMysteryOutcome(data, onContinue) {
+async function _showMysteryOutcome(data, onContinue, overrideAnimPlayer = null) {
   const {title, outcomeText, quoteText} = _getMysteryOutcomeContent(data);
   const tier = _pendingMysteryEvent?.tier || 1;
   const imgName = _pendingMysteryEvent?.image_name || _pendingMysteryEvent?.name || title;
@@ -2638,7 +2714,7 @@ async function _showMysteryOutcome(data, onContinue) {
     else if (prizeType === 'trait') animType = 'victory';
     else if (prizeType === 'curse') animType = 'defeat';
     if (animType) {
-      const p = gameState.players.find(x => x.is_current) || gameState.players[0];
+      const p = overrideAnimPlayer || gameState.players.find(x => x.is_current) || gameState.players[0];
       if (p?.hero_id && heroAnimMap[p.hero_id]?.[animType]) {
         animVideoHtml = `<video autoplay muted playsinline style="max-width:180px;width:50%;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.7)" src="/videos/${heroAnimMap[p.hero_id][animType]}"></video>`;
       }

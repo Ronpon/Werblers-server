@@ -20,6 +20,7 @@ app = Flask(
     static_folder=os.path.join(_IOS_DIR, "static"),
     template_folder=os.path.join(_IOS_DIR, "templates"),
 )
+app.secret_key = os.environ.get("SECRET_KEY", "werblers-dev-secret-key")
 
 IMAGES_DIR = os.path.join(_ROOT_DIR, "Images")
 MUSIC_DIR  = os.path.join(_ROOT_DIR, "Music")
