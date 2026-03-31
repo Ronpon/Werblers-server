@@ -272,7 +272,7 @@ def modify_movement_value(
     # --- Phase 1: value overrides ---
     for curse in player.curses:
         eid = curse.effect_id
-        if eid == "yer_a_hare" and card_value == 5:
+        if eid == "yer_a_hare" and card_value == 6:
             value = 1
         elif eid == "eughghghghgh":
             if len(player.curses) > len(player.traits) and card_value == 1:
@@ -334,19 +334,33 @@ def on_trait_gained(player: Player, trait: Trait, log: list[str]) -> tuple[list[
     pending_minions: list[Minion] = []
 
     if eid == "ball_and_chain":
-        item = Item("Ball and Chain", EquipSlot.WEAPON, strength_bonus=5)
-        pending_items.append(item)
-        log.append("  Ball and Chain: received Ball and Chain (+5 weapon)!")
+        item = Item("Ball and Chain", EquipSlot.WEAPON, strength_bonus=7)
+        used_hands = sum(w.hands for w in player.weapons)
+        if player.weapon_hands - used_hands >= item.hands:
+            player.weapons.append(item)
+            log.append("  Ball and Chain: received Ball and Chain (+5 weapon)!")
+        else:
+            pending_items.append(item)
+            log.append("  Ball and Chain: received Ball and Chain (+5 weapon) — no slot available!")
 
     elif eid == "birdie":
         item = Item("Power Driver", EquipSlot.WEAPON, strength_bonus=10, hands=2)
-        pending_items.append(item)
-        log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon)!")
+        used_hands = sum(w.hands for w in player.weapons)
+        if player.weapon_hands - used_hands >= item.hands:
+            player.weapons.append(item)
+            log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon)!")
+        else:
+            pending_items.append(item)
+            log.append("  You Got a Birdie!: received Power Driver (+10, 2H weapon) — no slot available!")
 
     elif eid == "kapwing":
-        item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=6)
-        pending_items.append(item)
-        log.append("  Kapwing!: received Bulletproof Vest (+6 chest)!")
+        item = Item("Bulletproof Vest", EquipSlot.CHEST, strength_bonus=8)
+        if len(player.chest_armor) < player.chest_slots:
+            player.chest_armor.append(item)
+            log.append("  Kapwing!: received Bulletproof Vest (+6 chest)!")
+        else:
+            pending_items.append(item)
+            log.append("  Kapwing!: received Bulletproof Vest (+6 chest) — no slot available!")
 
     elif eid == "grown_up":
         m = Minion("Ted Bearson", strength_bonus=3)
