@@ -851,10 +851,14 @@ function showChestModal(offer, tileScene) {
   const body  = document.getElementById('offer-modal-body');
   const item  = offer.items[0];
   _setOfferBackground(tileScene);
+  const scavengerBtn = offer.has_scavenger
+    ? `<button class="btn-secondary" onclick="scavengerSwap()">🔄 Scavenger: Swap</button>`
+    : '';
   body.innerHTML = `
     <h2 class="offer-title">Found Chest</h2>
     <div class="offer-items">${renderOfferItemCard(item, 0, true)}</div>
     <div class="offer-actions">
+      ${scavengerBtn}
       <button class="btn-primary" onclick="confirmChestTake()">Take It</button>
       <button class="btn-secondary" onclick="resolveOffer({take: false})">Leave It</button>
     </div>`;
@@ -1568,6 +1572,21 @@ function invCancel() {
   if (_invOnConfirm) _invOnConfirm({ placement: 'pack', pack_discard_index: -999 });
 }
 // ================================================================ RESOLVE OFFER
+async function scavengerSwap() {
+  const resp = await fetch('/api/scavenger_swap', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) { gameState = data.state; applyState(data.state); }
+  if (data.offer) {
+    _pendingOfferData = data.offer;
+    showChestModal(data.offer, {});
+  }
+}
+
 async function resolveOffer(choices) {
   const modal = document.getElementById('offer-modal');
   modal.style.background = '';
@@ -3844,6 +3863,8 @@ async function _postResolveMystery(body) {
       return;
     }
     const data = await resp.json();
+    // Save the player who encountered this event BEFORE the turn advances in the state
+    const mysteryPlayer = gameState?.players?.find(x => x.is_current) || null;
     if (data.state) { gameState = data.state; applyState(data.state); }
 
     const isWheel = _pendingMysteryEvent && _pendingMysteryEvent.event_id === 'the_wheel';
@@ -3868,7 +3889,7 @@ async function _postResolveMystery(body) {
         // (z-index 250) is not blocked behind it (z-index 400).
         document.getElementById('battle-overlay').classList.add('hidden');
         showChestModal(data.offer, {});
-      });
+      }, mysteryPlayer);
     } else if (data.phase === 'beggar_thank') {
       _showBeggarThankYou(data);
     } else if (data.phase === 'fairy_king_reveal') {
@@ -3885,7 +3906,7 @@ async function _postResolveMystery(body) {
             _wheelFarewell,
             () => _closeMysteryResult()
           );
-        });
+        }, mysteryPlayer);
       } else if (isMysteryBox) {
         // Mystery Box: nothing / trait → announcement, then farewell
         await _showMysteryOutcome(data, async () => {
@@ -3894,7 +3915,7 @@ async function _postResolveMystery(body) {
             _boxFarewell,
             () => _closeMysteryResult()
           );
-        });
+        }, mysteryPlayer);
       } else if (isBandits && data.prize_type === 'stolen') {
         await _showMysteryOutcome(data, async () => {
           await _showCharacterFarewell(
@@ -3902,9 +3923,9 @@ async function _postResolveMystery(body) {
             '"Thank you for your\u2026 heh\u2026 generosity."',
             () => _closeMysteryResult()
           );
-        });
+        }, mysteryPlayer);
       } else {
-        await _showMysteryOutcome(data, () => _closeMysteryResult());
+        await _showMysteryOutcome(data, () => _closeMysteryResult(), mysteryPlayer);
       }
     }
   } catch (err) {
@@ -4051,7 +4072,7 @@ function _getMysteryOutcomeContent(data) {
   return { title, outcomeText, quoteText };
 }
 
-async function _showMysteryOutcome(data, onContinue) {
+async function _showMysteryOutcome(data, onContinue, overrideAnimPlayer = null) {
   const { title, outcomeText, quoteText } = _getMysteryOutcomeContent(data);
   const eventId = data.event_id || (_pendingMysteryEvent && _pendingMysteryEvent.event_id) || '';
   const tier = _pendingMysteryEvent?.tier || 1;
@@ -4070,7 +4091,7 @@ async function _showMysteryOutcome(data, onContinue) {
     else if (prizeType === 'trait') animType = 'victory';
     else if (prizeType === 'curse') animType = 'defeat';
     if (animType) {
-      const p = gameState.players.find(x => x.is_current) || gameState.players[0];
+      const p = overrideAnimPlayer || gameState.players.find(x => x.is_current) || gameState.players[0];
       if (p && p.hero_id && heroAnimMap[p.hero_id] && heroAnimMap[p.hero_id][animType]) {
         const vsrc = `/videos/${heroAnimMap[p.hero_id][animType]}`;
         animVideoHtml = `<video id="mystery-anim-video" src="${vsrc}" autoplay muted playsinline

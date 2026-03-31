@@ -194,6 +194,11 @@ def api_begin_move():
             for item in raw_offer.get("items", [])
         ]
         offer = {**raw_offer, "items": enriched_items}
+        # Check if scavenger trait allows swapping the chest item
+        has_scavenger = result["phase"] == "offer_chest" and any(
+            t.effect_id == "scavenger" for t in _game.current_player.traits
+        )
+        offer["has_scavenger"] = has_scavenger
         return jsonify({
             "phase":      result["phase"],
             "offer":      offer,
@@ -272,6 +277,40 @@ def api_resolve_offer():
         })
     _st["pending_log"] = []
     return jsonify({"phase": "done", "state": _build_state()})
+
+@app.route("/api/scavenger_swap", methods=["POST"])
+def api_scavenger_swap():
+    """Scavenger trait: put chest item back on bottom and draw a new one."""
+    _st = _get_state()
+    _game = _st["game"]
+    if _game is None:
+        return jsonify({"error": "No game in progress"}), 400
+    po = _game._pending_offer
+    if po is None or po.get("type") != "chest":
+        return jsonify({"error": "No pending chest offer"}), 400
+    player = _game.current_player
+    if not any(t.effect_id == "scavenger" for t in player.traits):
+        return jsonify({"error": "Player does not have Scavenger trait"}), 400
+    level = po["level"]
+    old_item = po["items"][0]
+    _game.item_decks[level].put_bottom(old_item)
+    new_item = _game.item_decks[level].draw()
+    if new_item is None:
+        # Deck empty after put-back (shouldn't happen) — redraw the same item
+        new_item = _game.item_decks[level].draw()
+    if new_item is None:
+        return jsonify({"error": "Item deck is empty"}), 400
+    po["items"] = [new_item]
+    log_line = f"  Scavenger: put {old_item.name} back, drew {new_item.name}."
+    _st["pending_log"].append(log_line)
+    _st["last_log"].append(log_line)
+    enriched = _item_to_dict_from_obj(new_item)
+    return jsonify({
+        "ok": True,
+        "offer": {"items": [enriched], "has_scavenger": False},
+        "state": _build_state(),
+    })
+
 @app.route("/api/resolve_mystery", methods=["POST"])
 def api_resolve_mystery():
     """Resolve a pending mystery event.
@@ -1685,7 +1724,7 @@ def _build_state() -> dict:
             "name":               p.name,
             "hero_name":          p.name,
             "position":           p.position,
-            "strength":           p.combat_strength(),
+            "strength":           p.combat_strength(is_night=g.is_night),
             "hero_id":            hid,
             "token_image":        _TOKEN_MAP.get(hid) if hid else None,
             "hero_card_image":    _CARD_IMG_MAP.get(hid) if hid else None,

@@ -663,6 +663,9 @@ function showChestModal(offer, data) {
   const img = item.card_image ? `<img class="offer-item-img" src="/images/${item.card_image}" onclick="openCardZoom('/images/${item.card_image}')">` : '';
   const strSign = item.strength_bonus >= 0 ? '+' : '';
   const strText = item.strength_bonus !== 0 ? `${strSign}${item.strength_bonus} Str` : '';
+  const scavengerBtn = offer.has_scavenger
+    ? `<button class="btn-secondary" onclick="scavengerSwap()">🔄 Scavenger: Swap</button>`
+    : '';
   content.innerHTML = `<h2 class="offer-title">Found Chest</h2>
     <div class="offer-items">
       <div class="offer-item-card">${img}
@@ -671,6 +674,7 @@ function showChestModal(offer, data) {
       </div>
     </div>
     <div class="modal-btns">
+      ${scavengerBtn}
       <button class="btn-primary" onclick="confirmChestTake()">Take It</button>
       <button class="btn-secondary" onclick="openPlayerSheet()">View Inventory</button>
       <button class="btn-secondary" onclick="resolveOffer({take: false})">Leave It</button>
@@ -734,6 +738,21 @@ function confirmShopTake() {
     if (placement.discard) { resolveOffer({take: false, chosen_index: _shopSelectedIndex}); }
     else { resolveOffer({chosen_index: _shopSelectedIndex, ...placement}); }
   });
+}
+
+async function scavengerSwap() {
+  const resp = await fetch('/api/scavenger_swap', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  });
+  const data = await resp.json();
+  if (data.error) { alert(data.error); return; }
+  if (data.state) { gameState = data.state; applyState(data.state); }
+  if (data.offer) {
+    _pendingOfferData = data.offer;
+    showChestModal(data.offer, {});
+  }
 }
 
 async function resolveOffer(choices) {
@@ -887,7 +906,7 @@ function _useConsumableFromZoom(idx) {
     return;
   }
   // Bombs: show player selection first (outside combat only)
-  if (isBomb && !_game?._pendingCombat) {
+  if (isBomb && !gameState?.has_pending_combat) {
     const others = (gameState?.players || []).filter(x => x.player_id !== p.player_id);
     if (others.length > 0) { _selectBombTarget(idx, c); return; }
   }
@@ -931,7 +950,12 @@ function _showCombatOnlyNotice(name) {
 // ================================================================
 // TRAIT/CURSE TOOLTIP (tap-based)
 // ================================================================
+let _tcTooltipToken = 0;
 function showTcTooltip(name, desc, el) {
+  // Remove stale dismiss handlers from any previous tooltip
+  document.removeEventListener('touchstart', _hideTcTooltip);
+  document.removeEventListener('click', _hideTcTooltip);
+  _tcTooltipToken++;
   const tooltip = document.getElementById('tc-tooltip');
   tooltip.innerHTML = `<div class="tc-tooltip-name">${name}</div>${desc ? `<div class="tc-tooltip-desc">${desc}</div>` : ''}`;
   tooltip.classList.remove('hidden');
@@ -939,14 +963,18 @@ function showTcTooltip(name, desc, el) {
   const rect = el.getBoundingClientRect();
   tooltip.style.left = Math.min(rect.left, window.innerWidth - 290) + 'px';
   tooltip.style.top = (rect.bottom + 8) + 'px';
-  // Hide on next tap anywhere
+  // Hide on next tap anywhere (with guard against same-event race)
+  const token = _tcTooltipToken;
   setTimeout(() => {
+    if (token !== _tcTooltipToken) return;
     document.addEventListener('touchstart', _hideTcTooltip, {once: true});
     document.addEventListener('click', _hideTcTooltip, {once: true});
-  }, 50);
+  }, 80);
 }
 function _hideTcTooltip() {
   document.getElementById('tc-tooltip').classList.add('hidden');
+  document.removeEventListener('touchstart', _hideTcTooltip);
+  document.removeEventListener('click', _hideTcTooltip);
 }
 
 // ================================================================
@@ -3391,7 +3419,7 @@ function applyState(state) {
   }
 
   // Handle winner
-  if (state.winner) {
+  if (state.game_status === 'WON' && state.winner !== null && state.winner !== undefined) {
     const winnerP = state.players.find(x => x.player_id === state.winner);
     document.getElementById('winner-title').textContent = `${winnerP?.hero_name || 'Someone'} Wins!`;
     document.getElementById('winner-text').textContent = 'Congratulations!';

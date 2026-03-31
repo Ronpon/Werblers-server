@@ -327,9 +327,10 @@ class TestOgreCutpurse:
     def test_empty_pack_gives_player_bonus(self):
         p = _make_player(base_strength=30)
         log: list[str] = []
-        mm = enc._ogre_pre_combat(p, self._boss(), log)
-        # Empty pack → −5 to monster (i.e. +5 player)
-        assert mm == -5
+        monster_mod, player_mod = enc._ogre_pre_combat(p, self._boss(), log)
+        # Empty pack → +5 player, 0 monster
+        assert monster_mod == 0
+        assert player_mod == 5
         assert any("Empty-Handed" in m for m in log)
 
     def test_pack_items_discarded_and_str_added(self):
@@ -337,8 +338,9 @@ class TestOgreCutpurse:
         p.pack.append(Item("Sword", EquipSlot.WEAPON, strength_bonus=5))
         p.pack.append(Item("Shield", EquipSlot.WEAPON, strength_bonus=3))
         log: list[str] = []
-        mm = enc._ogre_pre_combat(p, self._boss(), log)
-        assert mm == 8  # 5 + 3 added to monster
+        monster_mod, player_mod = enc._ogre_pre_combat(p, self._boss(), log)
+        assert monster_mod == 8  # 5 + 3 added to monster
+        assert player_mod == 0
         assert len(p.pack) == 0
 
     def test_consumables_and_monsters_discarded(self):
@@ -347,8 +349,9 @@ class TestOgreCutpurse:
         p.consumables.append(Consumable("Potion", strength_bonus=3))
         p.captured_monsters.append(Monster("Rat", strength=2))
         log: list[str] = []
-        mm = enc._ogre_pre_combat(p, self._boss(), log)
-        assert mm == 0  # consumables/monsters don't add str to monster
+        monster_mod, player_mod = enc._ogre_pre_combat(p, self._boss(), log)
+        assert monster_mod == 0  # consumables/monsters don't add str to monster
+        assert player_mod == 0
         assert len(p.consumables) == 0
         assert len(p.captured_monsters) == 0
 

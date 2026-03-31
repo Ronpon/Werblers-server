@@ -902,13 +902,14 @@ def _apply_miniboss_modifiers(
     return player_mod, monster_mod, auto_win
 
 
-def _ogre_pre_combat(player: Player, miniboss: Monster, log: list[str]) -> int:
+def _ogre_pre_combat(player: Player, miniboss: Monster, log: list[str]) -> tuple[int, int]:
     """Ogre Cutpurse: discard all pack items; add equipped items' Str to monster.
 
     Also grants +5 player Str if pack was already empty.
-    Returns monster_str_modifier.
+    Returns (monster_str_modifier, player_str_modifier).
     """
     monster_mod = 0
+    player_mod = 0
     pack_was_empty = (
         len(player.pack) == 0
         and len(player.captured_monsters) == 0
@@ -917,8 +918,7 @@ def _ogre_pre_combat(player: Player, miniboss: Monster, log: list[str]) -> int:
 
     if pack_was_empty:
         log.append("  Empty-Handed: pack was already empty — +5 Str to player!")
-        # This is a player bonus, but we encode it as negative monster mod
-        monster_mod -= 5
+        player_mod = 5
     else:
         # Discard all pack contents
         equip_str_total = 0
@@ -943,7 +943,7 @@ def _ogre_pre_combat(player: Player, miniboss: Monster, log: list[str]) -> int:
                 f"Str to the Ogre!"
             )
 
-    return monster_mod
+    return monster_mod, player_mod
 
 
 def _apply_werbler_modifiers(
