@@ -364,13 +364,11 @@ class TestMinibossEncounter:
     def test_strong_player_wins_and_gets_reward(self):
         boss = Monster("Test Boss", strength=5, level=1, effect_id="shielded_golem")
         p = _make_player(base_strength=20)
-        reward_item = Item("Prize", EquipSlot.WEAPON, strength_bonus=10)
-        deck = _item_deck_with(reward_item)
+        deck = _empty_item_deck()
         log: list[str] = []
         result = enc.encounter_miniboss(p, boss, deck, log)
         assert result == CombatResult.WIN
         assert any("Victory" in m for m in log)
-        assert any("Prize" in m for m in log)
 
     def test_weak_player_loses_and_stays(self):
         boss = Monster("Test Boss", strength=50, level=1, effect_id="shielded_golem")

@@ -1109,20 +1109,10 @@ def encounter_miniboss(
     extra_player_strength: int = 0,
     extra_monster_strength: int = 0,
 ) -> Optional[CombatResult]:
-    """Fight a miniboss. Must win to progress.
+    """Fight a miniboss. Must win to progress. No items are awarded.
 
     ``pre_run_ogre`` (monster_mod, player_mod): when provided, skip calling
     ``_ogre_pre_combat`` — it was already run at fight-start to update display.
-
-    Parameters
-    ----------
-    item_deck :
-        The item deck for the NEXT tier (T2 for MB1, T3 for MB2).
-        On victory the player draws 1 item from this deck.
-    crossroads_discards :
-        Items the player chose to discard for Crossroads Demon's
-        "Fair Exchange" weakness.  On win, draw that many T3 items.
-        Caller handles the interactive discard prompt before calling.
     """
     # --- Flee check (Billfold: Fly, you dummy!) ---
     if flee and player.hero and player.hero.can_flee_miniboss:
@@ -1169,34 +1159,7 @@ def encounter_miniboss(
     if result == CombatResult.WIN:
         player.defeated_monsters.add(miniboss.name)
         log.append(f"  Victory over {miniboss.name}!")
-
-        # --- Win reward: draw 1 item from next-tier deck ---
-        reward = item_deck.draw()
-        if reward:
-            log.append(f"  Win reward: drew {reward.name} from next-tier deck.")
-        else:
-            log.append("  Win reward: item deck is empty — no reward.")
-
-        # --- Crossroads Demon: Fair Exchange bonus draws ---
-        if crossroads_discards and miniboss.effect_id == "crossroads_demon":
-            extra_count = len(crossroads_discards)
-            drawn_items: list[Item] = []
-            for _ in range(extra_count):
-                extra = item_deck.draw()
-                if extra:
-                    drawn_items.append(extra)
-            if drawn_items:
-                names = [i.name for i in drawn_items]
-                log.append(
-                    f"  Fair Exchange: drew {len(drawn_items)} T3 item(s): "
-                    f"{', '.join(names)}."
-                )
-            else:
-                log.append("  Fair Exchange: deck empty — no bonus items.")
-            # Return rewards including the bonus draws; caller handles placement
-            return result  # caller gets reward + drawn_items via the deck
-
-        return result  # caller handles the reward item placement
+        return result
 
     elif result == CombatResult.LOSE:
         # --- Leather Daddy: +1 Str token on loss ---

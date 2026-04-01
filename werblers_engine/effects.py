@@ -296,11 +296,6 @@ def modify_movement_value(
         else:
             value = max(0, value)
 
-    # Hero passive movement bonus (e.g. Billfold: +1 to all cards)
-    if player.hero and player.hero.movement_card_bonus:
-        value += player.hero.movement_card_bonus
-        value = max(0, value)
-
     return value
 
 

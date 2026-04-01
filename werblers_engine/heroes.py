@@ -85,7 +85,6 @@ HEROES: dict[HeroId, Hero] = {
         can_flee_monsters=True,
         can_flee_miniboss=True,
         flee_move_back=13,
-        movement_card_bonus=1,
     ),
     HeroId.GREGORY: Hero(
         id=HeroId.GREGORY,
